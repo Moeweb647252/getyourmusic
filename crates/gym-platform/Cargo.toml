@@ -1,0 +1,33 @@
+[package]
+name = "gym-platform"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+description = "Platform integrations (now playing, audio capture, native encoders) for GetYourMusic."
+
+[dependencies]
+gym-core.workspace = true
+base64.workspace = true
+cpal.workspace = true
+crossbeam-channel.workspace = true
+rtrb.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6.4"
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "libc", "NSRunningApplication"] }
+objc2-audio-toolbox = { version = "0.3.2", default-features = false, features = ["std", "ExtendedAudioFile", "AudioConverter", "AudioFile", "objc2-core-audio-types", "objc2-core-foundation"] }
+objc2-core-audio-types = { version = "0.3.2", default-features = false, features = ["std", "CoreAudioBaseTypes"] }
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFURL", "CFString"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSString", "NSURL", "NSProcessInfo", "NSArray", "NSFileManager", "NSError"] }
+
+[target.'cfg(target_os = "macos")'.build-dependencies]
+cmake = "0.1.58"
+
+[dev-dependencies]
+gym-media.workspace = true
+hound.workspace = true
+lofty.workspace = true
+tempfile.workspace = true

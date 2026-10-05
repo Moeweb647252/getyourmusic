@@ -1,0 +1,477 @@
+_version: 2
+
+app:
+  name:
+    en: GetYourMusic
+
+nav:
+  recorder:
+    en: Recorder
+  library:
+    en: Library
+  settings:
+    en: Settings
+
+menu:
+  about:
+    en: About GetYourMusic
+  settings:
+    en: Settings…
+  hide:
+    en: Hide GetYourMusic
+  quit:
+    en: Quit GetYourMusic
+  edit:
+    en: Edit
+  undo:
+    en: Undo
+  redo:
+    en: Redo
+  cut:
+    en: Cut
+  copy:
+    en: Copy
+  paste:
+    en: Paste
+  select_all:
+    en: Select All
+  recording:
+    en: Recording
+  start_recording:
+    en: Start Recording
+  stop_recording:
+    en: Stop Recording
+  view:
+    en: View
+  window:
+    en: Window
+  minimize:
+    en: Minimize
+
+about:
+  version:
+    en: "Version %{version}"
+  tagline:
+    en: Records what your music player plays into tagged audio files.
+  credits:
+    en: Track detection uses mediaremote-adapter (BSD 3-Clause). Interface built with GPUI Kit.
+
+title_bar:
+  recording:
+    en: Recording
+
+tray:
+  status_idle:
+    en: Not recording
+  status_starting:
+    en: Starting recording
+  status_recording:
+    en: "Recording · %{elapsed}"
+  status_finishing:
+    en: Finishing recordings
+  status_unavailable:
+    en: Recording unavailable
+  nothing_playing:
+    en: Nothing is playing
+  now_playing:
+    en: "%{title} — %{artist}"
+  counts:
+    en: "Saved %{saved} · Skipped %{skipped}"
+  open:
+    en: Open GetYourMusic
+  show_library:
+    en: Show Library
+  show_recordings_macos:
+    en: Show Recordings in Finder
+  show_recordings_other:
+    en: Open Recordings Folder
+  tooltip_recording:
+    en: "GetYourMusic — recording %{elapsed}"
+
+recorder:
+  record:
+    en: Record
+  stop:
+    en: Stop
+  record_tooltip:
+    en: Start recording
+  stop_tooltip:
+    en: Stop recording
+  source:
+    en: Source
+  format:
+    en: Format
+  playing:
+    en: Playing
+  paused:
+    en: Paused
+  nothing_playing:
+    en: Nothing is playing
+  nothing_playing_hint:
+    en: Start a playlist in your music app.
+  waiting:
+    en: Waiting for playback
+  unknown_artist:
+    en: Unknown artist
+  levels:
+    en: Input level
+  session:
+    en: This session
+  saved_count:
+    en: "Saved %{count}"
+  skipped_count:
+    en: "Skipped %{count}"
+  empty_title:
+    en: No tracks yet
+  empty_hint:
+    en: "Play music, then press %{shortcut} to record each track to its own file."
+  cannot_record_without_tracks:
+    en: Track detection is unavailable, so recording is disabled.
+
+track:
+  recording:
+    en: Recording
+  paused:
+    en: Paused
+  waiting:
+    en: Waiting
+  encoding:
+    en: "Encoding %{percent}%"
+  saved:
+    en: Saved
+  skipped:
+    en: Skipped
+  failed:
+    en: Failed
+  partial:
+    en: Partial
+  reason:
+    started_mid_track:
+      en: Recording started partway through the track.
+    interrupted:
+      en: Playback was seeked or interrupted.
+    ended_early:
+      en: The player moved on before the track ended.
+    stopped_early:
+      en: Recording stopped before the track ended.
+    too_short:
+      en: The track was too short to keep.
+    silent:
+      en: No audio was captured for this track.
+    exists:
+      en: A file with this name already exists.
+
+action:
+  reveal:
+    en: Show in Finder
+  open:
+    en: Open
+  copy_path:
+    en: Copy Path
+  move_to_trash:
+    en: Move to Trash
+  open_privacy_settings:
+    en: Open Privacy Settings
+  choose_source:
+    en: Choose Source…
+  show_recordings:
+    en: Show Recordings
+  dismiss:
+    en: Dismiss
+
+alert:
+  silence_title:
+    en: No sound is reaching GetYourMusic
+  silence_loopback:
+    en: macOS may be blocking system audio recording. Allow GetYourMusic under System Audio Recording in Privacy & Security, then start recording again.
+  silence_input:
+    en: "Nothing is arriving from %{source}. Route your player’s output to this device, or choose another source."
+  now_playing_title:
+    en: Can’t detect what’s playing
+  now_playing_body:
+    en: "Recordings are split into songs using the system’s Now Playing information, which isn’t available right now. Details: %{detail}"
+  no_loopback:
+    en: This version of macOS can’t record system audio directly. Install a loopback driver such as BlackHole and select it as the source.
+
+toast:
+  start_failed:
+    en: Couldn’t start recording
+  save_failed:
+    en: "Couldn’t save “%{title}”"
+  skipped_started_mid_track:
+    en: "“%{title}” wasn’t saved because recording started partway through it."
+  skipped_interrupted:
+    en: "“%{title}” wasn’t saved because playback was seeked or interrupted."
+  skipped_ended_early:
+    en: "“%{title}” wasn’t saved because the player moved on before it ended."
+  skipped_stopped_early:
+    en: "“%{title}” wasn’t saved because recording stopped before it ended."
+  skipped_silent:
+    en: "“%{title}” wasn’t saved because no audio was captured."
+  skipped_exists:
+    en: "“%{title}” wasn’t saved because a file with the same name already exists."
+  stopped_idle:
+    en: "Recording stopped after %{minutes} minutes without playback."
+  stopped_device_lost:
+    en: Recording stopped because the audio device disconnected.
+  trashed:
+    en: "Moved “%{title}” to the Trash."
+  trash_failed:
+    en: "Couldn’t move “%{title}” to the Trash."
+  open_failed:
+    en: Couldn’t open the file. It may have been moved or deleted.
+  path_copied:
+    en: Path copied.
+  settings_recovered:
+    en: Your settings file couldn’t be read, so defaults were restored. The old file was kept next to it.
+
+library:
+  search:
+    en: Search recordings
+  count_one:
+    en: 1 recording
+  count_other:
+    en: "%{count} recordings"
+  empty_title:
+    en: No recordings yet
+  empty_hint:
+    en: Tracks you record appear here.
+  no_matches:
+    en: No recordings match your search.
+  column:
+    title:
+      en: Title
+    artist:
+      en: Artist
+    album:
+      en: Album
+    duration:
+      en: Duration
+    format:
+      en: Format
+    size:
+      en: Size
+    recorded:
+      en: Recorded
+
+status:
+  free_space:
+    en: "%{size} free"
+
+source:
+  default:
+    en: System output
+  default_named:
+    en: "System output — %{name}"
+  loopback:
+    en: "%{name}"
+  input:
+    en: "%{name} (input)"
+  none:
+    en: No audio source available
+
+format:
+  flac:
+    en: FLAC
+  mp3:
+    en: MP3
+  m4a:
+    en: M4A
+  flac_detail:
+    en: "FLAC · %{bits}-bit"
+  alac_detail:
+    en: "ALAC · %{bits}-bit"
+  aac_detail:
+    en: "AAC · %{kbps} kbps"
+  mp3_cbr_detail:
+    en: "MP3 · %{kbps} kbps"
+  mp3_vbr_detail:
+    en: "MP3 · VBR %{level}"
+
+naming:
+  unknown_artist:
+    en: Unknown Artist
+  unknown_album:
+    en: Unknown Album
+  untitled:
+    en: Untitled
+
+settings:
+  page:
+    recording:
+      en: Recording
+    output:
+      en: Output
+    storage:
+      en: Storage
+    appearance:
+      en: Appearance
+    about:
+      en: About
+  group:
+    menu_bar:
+      en: Menu bar
+    system_tray:
+      en: System tray
+    capture:
+      en: Capture
+    tracks:
+      en: Tracks
+    format:
+      en: Format
+    quality:
+      en: Quality
+    files:
+      en: Files
+    location:
+      en: Location
+    theme:
+      en: Theme
+    language:
+      en: Language
+    diagnostics:
+      en: Diagnostics
+  source:
+    title:
+      en: Audio source
+    description:
+      en: Record an output device directly, or an input such as BlackHole that receives your player’s audio.
+  follow_player:
+    title:
+      en: Player
+    description:
+      en: Only record this app. Audio from other apps pauses the current track.
+    any:
+      en: Any player
+  incomplete:
+    title:
+      en: Incomplete tracks
+    description:
+      en: Tracks that weren’t captured from start to finish, such as the one playing when you start recording.
+    discard:
+      en: Don’t save
+    keep:
+      en: Save anyway
+  trim_silence:
+    title:
+      en: Trim silence
+    description:
+      en: Remove silence at the start and end of each track, such as the gap between songs.
+  auto_stop:
+    title:
+      en: Stop when idle
+    description:
+      en: Stop recording when nothing has played for a while.
+    never:
+      en: Never
+    minutes:
+      en: "After %{minutes} minutes"
+  format:
+    title:
+      en: File format
+    description:
+      en: FLAC and ALAC are lossless. MP3 and AAC are smaller.
+  bit_depth:
+    title:
+      en: Bit depth
+    description:
+      en: Used for FLAC and ALAC.
+    bits:
+      en: "%{bits}-bit"
+  mp3_quality:
+    title:
+      en: MP3 quality
+    cbr:
+      en: "%{kbps} kbps"
+    vbr_v0:
+      en: VBR, highest (V0)
+    vbr_v2:
+      en: VBR, high (V2)
+  m4a_codec:
+    title:
+      en: M4A codec
+    aac:
+      en: AAC
+    alac:
+      en: Apple Lossless (ALAC)
+  aac_bitrate:
+    title:
+      en: AAC bitrate
+  sample_rate:
+    title:
+      en: Sample rate
+    description:
+      en: Formats that don’t support the device’s rate are converted automatically.
+    source:
+      en: Same as source
+    hz44100:
+      en: 44.1 kHz
+    hz48000:
+      en: 48 kHz
+  naming:
+    title:
+      en: File names
+    description:
+      en: "Use / for folders. Placeholders: {title} {artist} {album} {album_artist} {genre} {track} {player}."
+    preview:
+      en: "Example: %{path}"
+    invalid:
+      en: "Not saved: %{error}"
+  conflict:
+    title:
+      en: If the file exists
+    keep_both:
+      en: Keep both
+    overwrite:
+      en: Replace
+    skip:
+      en: Don’t save
+  storage:
+    title:
+      en: Save to
+    description:
+      en: Where finished recordings are stored.
+    local:
+      en: Folder on this Mac
+  folder:
+    title:
+      en: Folder
+    choose:
+      en: Choose…
+    prompt:
+      en: Choose
+  tray:
+    show_macos:
+      en: Show in menu bar
+    show_other:
+      en: Show in system tray
+    keep_running_title:
+      en: Keep recording when the window is closed
+    keep_running_macos:
+      en: GetYourMusic stays in the menu bar until you quit it there.
+    keep_running_other:
+      en: GetYourMusic stays in the system tray until you quit it there.
+  theme:
+    title:
+      en: Appearance
+    system:
+      en: System
+    light:
+      en: Light
+    dark:
+      en: Dark
+  language:
+    title:
+      en: Language
+    description:
+      en: More languages will be added in future versions.
+  logs:
+    title:
+      en: Logs
+    description:
+      en: Include the log files when reporting a problem.
+    open:
+      en: Show Logs
+  platform:
+    title:
+      en: System

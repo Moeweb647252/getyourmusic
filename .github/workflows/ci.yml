@@ -1,0 +1,45 @@
+name: CI
+
+# Manual only: run it from the Actions tab ("Run workflow") when a cross-platform check is
+# worth the runner minutes. To run it automatically, add `push` / `pull_request` triggers.
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_PROFILE_DEV_DEBUG: 0
+
+jobs:
+  build:
+    name: Build and test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        # macOS is the implemented platform; Windows and Linux build the shared code, the tray
+        # and the "unsupported" platform stubs.
+        os: [macos-latest, windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          components: clippy, rustfmt
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        # GPUI (X11/Wayland, fonts, Vulkan) and cpal (ALSA). The tray uses D-Bus directly.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc g++ clang libfontconfig-dev libwayland-dev \
+            libxkbcommon-x11-dev libx11-xcb-dev libssl-dev libzstd-dev libasound2-dev \
+            vulkan-validationlayers libvulkan1
+      - name: Format
+        if: runner.os == 'macOS'
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- --deny warnings
+      - name: Test
+        run: cargo test --workspace

@@ -1,0 +1,19 @@
+[package]
+name = "gym-media"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+description = "Cross-platform audio encoders (FLAC, MP3) for GetYourMusic."
+
+[dependencies]
+gym-core.workspace = true
+flacenc.workspace = true
+hound.workspace = true
+mp3lame-encoder.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+gym-core = { workspace = true, features = ["testing"] }
+crossbeam-channel.workspace = true
+lofty.workspace = true
+tempfile.workspace = true

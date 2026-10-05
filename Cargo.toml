@@ -1,0 +1,69 @@
+[workspace]
+members = ["crates/*"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace.dependencies]
+gym-core = { path = "crates/gym-core" }
+gym-media = { path = "crates/gym-media" }
+gym-platform = { path = "crates/gym-platform" }
+
+async-channel = "2.5"
+base64 = "0.23"
+chrono = { version = "0.4.45", features = ["serde"] }
+cpal = "0.18.2"
+crossbeam-channel = "0.5.17"
+directories = "6"
+flacenc = "0.5.1"
+hound = "3.5.1"
+lofty = "0.25.4"
+mp3lame-encoder = "0.2.5"
+rtrb = "0.4"
+rubato = "5.0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3.27"
+thiserror = "2"
+tracing = "0.1.44"
+uuid = { version = "1.27", features = ["v4", "serde"] }
+
+[package]
+name = "getyourmusic"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+description = "Record what your music player plays into tagged audio files."
+
+[dependencies]
+gym-core.workspace = true
+gym-media.workspace = true
+gym-platform.workspace = true
+
+async-channel.workspace = true
+chrono.workspace = true
+crossbeam-channel.workspace = true
+gpui-kit = "0.7.1"
+rust-i18n = "4.2.4"
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-appender = "0.2.5"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+png = "0.18"
+# The default `libappindicator` backend needs GTK; Linux uses the D-Bus `ksni` backend instead.
+tray-icon = { version = "0.26", default-features = false }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+tray-icon = { version = "0.26", default-features = false, features = ["ksni"] }
+
+[dev-dependencies]
+regex = "1.13"
+serde_yaml_ng = "0.10"
+uuid.workspace = true
+
+[profile.dev.package."*"]
+opt-level = 2
