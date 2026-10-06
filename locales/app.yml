@@ -325,6 +325,8 @@ settings:
       en: Files
     location:
       en: Location
+    cache:
+      en: Cache
     theme:
       en: Theme
     language:
@@ -438,8 +440,36 @@ settings:
       en: Folder
     choose:
       en: Choose…
+    use_default:
+      en: Use Default
     prompt:
       en: Choose
+  cache_mode:
+    title:
+      en: Keep recordings in progress
+    description:
+      en: Audio waits here until the track ends and is saved. Memory avoids writing to disk but uses RAM. Changes apply the next time you start recording.
+    disk:
+      en: On disk
+    memory:
+      en: In memory
+  memory_limit:
+    title:
+      en: Memory limit (MB)
+    description:
+      en: Shared by all tracks that haven’t been saved yet. 0 means no limit.
+  memory_overflow:
+    title:
+      en: When the limit is reached
+    spill_to_disk:
+      en: Continue on disk
+    fail:
+      en: Don’t save the track
+  cache_folder:
+    title:
+      en: Cache folder
+    description:
+      en: Holds audio of tracks being recorded, and files being encoded. In memory mode, also the part of a track past the memory limit.
   tray:
     show_macos:
       en: Show in menu bar

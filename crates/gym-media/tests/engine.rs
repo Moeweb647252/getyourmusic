@@ -6,14 +6,14 @@ use std::time::{Duration, SystemTime};
 use gym_core::capture::PcmSpec;
 use gym_core::encode::{BitDepth, EncodeSettings, EncoderRegistry, OutputFormat};
 use gym_core::engine::{
-    EngineConfig, EngineEvent, EngineServices, OutputConfig, PartialReason, RecordingEngine,
-    SkipReason, StopReason,
+    CacheConfig, EngineConfig, EngineEvent, EngineServices, OutputConfig, PartialReason,
+    RecordingEngine, SkipReason, StopReason,
 };
-use gym_core::library::Library;
+use gym_core::library::{Library, RecordingEntry};
 use gym_core::model::{NowPlaying, PlayerInfo, TrackId, TrackMetadata};
 use gym_core::naming::{DEFAULT_TEMPLATE, NamingFallbacks, NamingTemplate};
 use gym_core::now_playing::{NowPlayingEvent, NowPlayingMonitor};
-use gym_core::settings::{IncompletePolicy, SampleRatePolicy};
+use gym_core::settings::{CacheMode, IncompletePolicy, MemoryOverflow, SampleRatePolicy};
 use gym_core::storage::{ConflictPolicy, LocalStorage};
 use gym_core::testing::{FakeCapture, FakeFeeder, FakeNowPlaying};
 
@@ -57,8 +57,18 @@ fn feed(feeder: &mut FakeFeeder, origin: SystemTime, from: f64, seconds: f64, fr
     }
 }
 
-#[test]
-fn records_a_playlist_into_tagged_files() {
+struct Recorded {
+    saved: Vec<RecordingEntry>,
+    skipped: Vec<SkipReason>,
+    failed: Vec<String>,
+    library: Arc<Library>,
+    spool: tempfile::TempDir,
+    music: tempfile::TempDir,
+    _data: tempfile::TempDir,
+}
+
+/// Records a three-track playlist: one joined mid-track, then two full 8 s tracks.
+fn record_playlist(cache: CacheConfig) -> Recorded {
     let spool = tempfile::tempdir().unwrap();
     let music = tempfile::tempdir().unwrap();
     let data = tempfile::tempdir().unwrap();
@@ -99,6 +109,7 @@ fn records_a_playlist_into_tagged_files() {
             incomplete: IncompletePolicy::Discard,
             trim_silence: true,
         },
+        cache,
     };
 
     let engine = RecordingEngine::start(config, services).unwrap();
@@ -135,6 +146,7 @@ fn records_a_playlist_into_tagged_files() {
 
     let mut saved = Vec::new();
     let mut skipped = Vec::new();
+    let mut failed = Vec::new();
     loop {
         match events
             .recv_timeout(Duration::from_secs(60))
@@ -142,7 +154,7 @@ fn records_a_playlist_into_tagged_files() {
         {
             EngineEvent::Saved { entry, .. } => saved.push(entry),
             EngineEvent::Skipped { reason, .. } => skipped.push(reason),
-            EngineEvent::Failed { error, .. } => panic!("finalizing failed: {error}"),
+            EngineEvent::Failed { error, .. } => failed.push(error),
             EngineEvent::Stopped(reason) => {
                 assert_eq!(reason, StopReason::User);
                 break;
@@ -150,7 +162,28 @@ fn records_a_playlist_into_tagged_files() {
             _ => {}
         }
     }
+    Recorded {
+        saved,
+        skipped,
+        failed,
+        library,
+        spool,
+        music,
+        _data: data,
+    }
+}
 
+fn assert_saved_playlist(cache: CacheConfig) {
+    let Recorded {
+        saved,
+        skipped,
+        failed,
+        library,
+        spool,
+        music,
+        ..
+    } = record_playlist(cache);
+    assert!(failed.is_empty(), "{cache:?}: {failed:?}");
     assert_eq!(
         skipped,
         vec![SkipReason::Incomplete(PartialReason::StartedMidTrack)]
@@ -161,7 +194,7 @@ fn records_a_playlist_into_tagged_files() {
     for entry in &saved {
         assert!(
             entry.duration_ms.abs_diff(8_000) <= 20,
-            "{} lasted {} ms",
+            "{cache:?}: {} lasted {} ms",
             entry.track.title,
             entry.duration_ms
         );
@@ -180,4 +213,45 @@ fn records_a_playlist_into_tagged_files() {
         0,
         "spool files are cleaned up"
     );
+}
+
+#[test]
+fn records_a_playlist_into_tagged_files() {
+    assert_saved_playlist(CacheConfig::default());
+}
+
+#[test]
+fn records_in_memory() {
+    assert_saved_playlist(CacheConfig {
+        mode: CacheMode::Memory,
+        memory_limit: None,
+        on_overflow: MemoryOverflow::Fail,
+    });
+}
+
+#[test]
+fn continues_on_disk_past_the_memory_limit() {
+    // About 2.7 s of 48 kHz stereo audio fits; each 8 s track overflows.
+    assert_saved_playlist(CacheConfig {
+        mode: CacheMode::Memory,
+        memory_limit: Some(1024 * 1024),
+        on_overflow: MemoryOverflow::SpillToDisk,
+    });
+}
+
+#[test]
+fn fails_tracks_past_the_memory_limit() {
+    let recorded = record_playlist(CacheConfig {
+        mode: CacheMode::Memory,
+        memory_limit: Some(1024 * 1024),
+        on_overflow: MemoryOverflow::Fail,
+    });
+    assert!(recorded.saved.is_empty());
+    assert_eq!(recorded.failed.len(), 3, "{:?}", recorded.failed);
+    assert!(
+        recorded.failed.iter().all(|e| e.contains("memory limit")),
+        "{:?}",
+        recorded.failed
+    );
+    assert_eq!(std::fs::read_dir(recorded.spool.path()).unwrap().count(), 0);
 }

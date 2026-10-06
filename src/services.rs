@@ -12,6 +12,8 @@ use gym_core::platform::{AppDirs, Platform};
 use gym_core::settings::{AppSettings, StorageProviderKind};
 use gym_core::storage::{LocalStorage, StorageProvider};
 
+use crate::settings_store::SettingsStore;
+
 pub struct Services {
     pub platform: Arc<dyn Platform>,
     pub dirs: AppDirs,
@@ -36,6 +38,9 @@ impl Services {
 
         // Leftovers from a session that did not shut down cleanly cannot be resumed.
         gym_core::engine::clean_spool(&dirs.spool_dir());
+        if let Some(folder) = &SettingsStore::get(cx).cache.folder {
+            gym_core::engine::clean_spool(folder);
+        }
 
         let now_playing = platform
             .now_playing_source()
@@ -66,6 +71,15 @@ impl Services {
             .local_folder
             .clone()
             .unwrap_or_else(|| self.dirs.default_music_folder.clone())
+    }
+
+    /// The folder for audio of tracks being recorded with the current settings.
+    pub fn cache_folder(&self, settings: &AppSettings) -> PathBuf {
+        settings
+            .cache
+            .folder
+            .clone()
+            .unwrap_or_else(|| self.dirs.spool_dir())
     }
 
     /// The storage provider selected in settings.

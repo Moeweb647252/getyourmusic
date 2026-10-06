@@ -205,7 +205,7 @@ impl RecordingSession {
             encoders: services.encoders.clone(),
             storage: services.storage(&settings),
             library: Arc::clone(&services.library),
-            spool_dir: services.dirs.spool_dir(),
+            spool_dir: services.cache_folder(&settings),
         };
         let config = EngineConfig {
             capture_source: settings.recording.capture_source.clone(),
@@ -213,6 +213,7 @@ impl RecordingSession {
             auto_stop: (settings.recording.auto_stop_minutes > 0)
                 .then(|| Duration::from_secs(settings.recording.auto_stop_minutes as u64 * 60)),
             output: output_config(&settings),
+            cache: (&settings.cache).into(),
         };
 
         self.state = SessionState::Starting;

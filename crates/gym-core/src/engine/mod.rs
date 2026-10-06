@@ -8,6 +8,7 @@ mod finalize;
 mod meter;
 mod recorder;
 mod segmenter;
+mod spool;
 mod timeline;
 
 use std::path::PathBuf;
@@ -23,7 +24,9 @@ use crate::library::{Library, RecordingEntry};
 use crate::model::NowPlaying;
 use crate::naming::{NamingFallbacks, NamingTemplate};
 use crate::now_playing::NowPlayingMonitor;
-use crate::settings::{IncompletePolicy, SampleRatePolicy};
+use crate::settings::{
+    CacheMode, CacheSettings, IncompletePolicy, MemoryOverflow, SampleRatePolicy,
+};
 use crate::storage::{ConflictPolicy, StorageProvider};
 
 pub use meter::{LevelMeter, Levels, to_dbfs};
@@ -43,6 +46,25 @@ pub struct OutputConfig {
     pub trim_silence: bool,
 }
 
+/// How segments are buffered between recording and encoding. Fixed for a recording session.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CacheConfig {
+    pub mode: CacheMode,
+    /// Memory all unsaved segments may use together, in bytes; `None` means no limit.
+    pub memory_limit: Option<u64>,
+    pub on_overflow: MemoryOverflow,
+}
+
+impl From<&CacheSettings> for CacheConfig {
+    fn from(settings: &CacheSettings) -> Self {
+        Self {
+            mode: settings.mode,
+            memory_limit: settings.memory_limit_bytes(),
+            on_overflow: settings.on_overflow,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct EngineConfig {
     /// Capture source id; `None` uses the default source.
@@ -52,6 +74,7 @@ pub struct EngineConfig {
     /// Stop automatically after this long without anything to record.
     pub auto_stop: Option<Duration>,
     pub output: OutputConfig,
+    pub cache: CacheConfig,
 }
 
 /// Collaborators the engine needs; all are shared with the rest of the application.
@@ -62,6 +85,7 @@ pub struct EngineServices {
     pub encoders: EncoderRegistry,
     pub storage: Arc<dyn StorageProvider>,
     pub library: Arc<Library>,
+    /// Cache folder for segment audio and encoded files before they are stored.
     pub spool_dir: PathBuf,
 }
 
@@ -240,13 +264,45 @@ impl RecordingEngine {
 }
 
 /// Removes leftovers from sessions that did not shut down cleanly.
+///
+/// Only files named like the engine's own are touched; the folder may be one the user chose.
 pub fn clean_spool(spool_dir: &std::path::Path) {
     let Ok(entries) = std::fs::read_dir(spool_dir) else {
         return;
     };
     for entry in entries.flatten() {
+        let is_file = entry.file_type().is_ok_and(|t| t.is_file());
+        if !is_file || !spool::is_spool_file(&entry.path()) {
+            continue;
+        }
         if let Err(err) = std::fs::remove_file(entry.path()) {
             tracing::warn!(%err, path = %entry.path().display(), "cannot remove spool file");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clean_spool_keeps_files_it_did_not_create() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in [
+            "abcd1234-0001.wav",
+            "abcd1234-0001.flac",
+            "notes.txt",
+            "song.flac",
+        ] {
+            std::fs::write(dir.path().join(name), b"x").unwrap();
+        }
+        std::fs::create_dir(dir.path().join("abcd1234-0002.wav")).unwrap();
+        clean_spool(dir.path());
+        let mut left: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        left.sort();
+        assert_eq!(left, ["abcd1234-0002.wav", "notes.txt", "song.flac"]);
     }
 }

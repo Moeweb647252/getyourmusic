@@ -20,6 +20,7 @@ pub struct AppSettings {
     pub recording: RecordingSettings,
     pub output: OutputSettings,
     pub storage: StorageSettings,
+    pub cache: CacheSettings,
     pub appearance: AppearanceSettings,
 }
 
@@ -31,6 +32,7 @@ impl Default for AppSettings {
             recording: RecordingSettings::default(),
             output: OutputSettings::default(),
             storage: StorageSettings::default(),
+            cache: CacheSettings::default(),
             appearance: AppearanceSettings::default(),
         }
     }
@@ -146,6 +148,55 @@ pub struct StorageSettings {
     pub local_folder: Option<PathBuf>,
 }
 
+/// Where audio is buffered while a track records, before it is encoded.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheMode {
+    #[default]
+    Disk,
+    Memory,
+}
+
+/// What to do when in-memory audio reaches [`CacheSettings::memory_limit_mb`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryOverflow {
+    /// Keep what is in memory and write the rest of the track to the cache folder.
+    #[default]
+    SpillToDisk,
+    /// Don't save the track.
+    Fail,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CacheSettings {
+    pub mode: CacheMode,
+    /// Memory for audio of all tracks not yet saved, in MiB; `0` means no limit.
+    pub memory_limit_mb: u32,
+    pub on_overflow: MemoryOverflow,
+    /// Folder for cache files; `None` uses the default.
+    pub folder: Option<PathBuf>,
+}
+
+impl Default for CacheSettings {
+    fn default() -> Self {
+        Self {
+            mode: CacheMode::default(),
+            memory_limit_mb: 1024,
+            on_overflow: MemoryOverflow::default(),
+            folder: None,
+        }
+    }
+}
+
+impl CacheSettings {
+    /// The memory limit in bytes, or `None` when unlimited.
+    pub fn memory_limit_bytes(&self) -> Option<u64> {
+        (self.memory_limit_mb > 0).then(|| u64::from(self.memory_limit_mb) * 1024 * 1024)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ThemePreference {
@@ -244,6 +295,9 @@ mod tests {
         let path = dir.path().join("settings.json");
         let mut settings = AppSettings::default();
         settings.recording.follow_player = Some("com.tencent.QQMusicMac".into());
+        settings.cache.mode = CacheMode::Memory;
+        settings.cache.on_overflow = MemoryOverflow::Fail;
+        settings.cache.folder = Some("/tmp/gym-cache".into());
         settings.save(&path).unwrap();
         let loaded = AppSettings::load(&path).unwrap();
         assert_eq!(loaded.settings, settings);
@@ -252,6 +306,7 @@ mod tests {
         let partial = AppSettings::load(&path).unwrap().settings;
         assert!(!partial.recording.trim_silence);
         assert_eq!(partial.output, OutputSettings::default());
+        assert_eq!(partial.cache, CacheSettings::default());
     }
 
     #[test]

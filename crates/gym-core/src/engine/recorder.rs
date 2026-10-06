@@ -1,8 +1,7 @@
 //! The recorder thread: drains the capture queue, feeds the segmenter and spools segments.
 
 use std::collections::HashMap;
-use std::fs::File;
-use std::io::{self, BufWriter};
+use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
@@ -17,10 +16,11 @@ use crate::now_playing::NowPlayingEvent;
 
 use super::finalize::{FinalizeJob, Job};
 use super::segmenter::{SegmentEndCause, SegmentId, SegmentSink, Segmenter, SegmenterConfig};
+use super::spool::{self, MemoryBudget, SpoolWriter};
 use super::timeline::CaptureTimeline;
 use super::{
-    Command, EngineConfig, EngineEvent, EngineServices, LevelMeter, OutputConfig, PartialReason,
-    StopReason,
+    CacheConfig, Command, EngineConfig, EngineEvent, EngineServices, LevelMeter, OutputConfig,
+    PartialReason, StopReason,
 };
 
 const TICK: Duration = Duration::from_millis(15);
@@ -50,7 +50,9 @@ pub(super) fn spawn(
     let sink = SpoolSink {
         spool_dir: services.spool_dir.clone(),
         spec,
-        session: uuid::Uuid::new_v4().simple().to_string()[..8].to_owned(),
+        session: spool::new_session(),
+        cache: config.cache,
+        budget: MemoryBudget::new(config.cache.memory_limit),
         output: config.output.clone(),
         segments: HashMap::new(),
         latest: HashMap::new(),
@@ -224,8 +226,8 @@ struct SpoolSegment {
     track_id: TrackId,
     /// Snapshot the segment started with; superseded by newer metadata for the same track.
     initial: NowPlaying,
-    path: PathBuf,
-    writer: Option<hound::WavWriter<BufWriter<File>>>,
+    /// `None` once the segment failed; the failure has been reported.
+    writer: Option<SpoolWriter>,
     frames: u64,
     peak: f32,
     partial_start: bool,
@@ -233,11 +235,13 @@ struct SpoolSegment {
     recorded_at: DateTime<Utc>,
 }
 
-/// Writes segments to temporary WAV files and hands finished ones to the finalize worker.
+/// Buffers segments in the cache and hands finished ones to the finalize worker.
 struct SpoolSink {
     spool_dir: PathBuf,
     spec: PcmSpec,
     session: String,
+    cache: CacheConfig,
+    budget: Arc<MemoryBudget>,
     output: OutputConfig,
     segments: HashMap<SegmentId, SpoolSegment>,
     /// Most recent metadata per track; players often publish artwork after the title.
@@ -309,17 +313,11 @@ impl SegmentSink for SpoolSink {
     fn begin(&mut self, id: SegmentId, track: &NowPlaying, partial_start: bool) {
         let path = self
             .spool_dir
-            .join(format!("{}-{:04}.wav", self.session, id.0));
-        let wav_spec = hound::WavSpec {
-            channels: self.spec.channels,
-            sample_rate: self.spec.sample_rate,
-            bits_per_sample: 32,
-            sample_format: hound::SampleFormat::Float,
-        };
-        let writer = match hound::WavWriter::create(&path, wav_spec) {
+            .join(spool::spool_file_name(&self.session, id));
+        let writer = match SpoolWriter::create(path, self.spec, &self.cache, &self.budget) {
             Ok(writer) => Some(writer),
             Err(err) => {
-                self.fail(id, format!("cannot create spool file: {err}"));
+                self.fail(id, err);
                 None
             }
         };
@@ -329,7 +327,6 @@ impl SegmentSink for SpoolSink {
             SpoolSegment {
                 track_id: track.track_id.clone(),
                 initial: latest.clone(),
-                path,
                 writer,
                 frames: 0,
                 peak: 0.0,
@@ -354,19 +351,17 @@ impl SegmentSink for SpoolSink {
         let Some(writer) = segment.writer.as_mut() else {
             return;
         };
-        let mut result = Ok(());
-        for &sample in samples {
-            segment.peak = segment.peak.max(sample.abs());
-            if let Err(err) = writer.write_sample(sample) {
-                result = Err(err);
-                break;
+        match writer.write(samples) {
+            Ok(()) => {
+                segment.frames += samples.len() as u64 / channels;
+                segment.peak = samples.iter().fold(segment.peak, |m, s| m.max(s.abs()));
             }
-        }
-        match result {
-            Ok(()) => segment.frames += samples.len() as u64 / channels,
             Err(err) => {
-                segment.writer = None;
-                self.fail(id, format!("cannot write spool file: {err}"));
+                if let Some(writer) = segment.writer.take() {
+                    writer.discard();
+                }
+                tracing::warn!(segment = id.0, %err, "segment failed");
+                self.fail(id, err);
             }
         }
     }
@@ -387,14 +382,15 @@ impl SegmentSink for SpoolSink {
         };
         let Some(writer) = segment.writer.take() else {
             // Already reported as failed.
-            let _ = std::fs::remove_file(&segment.path);
             return;
         };
-        if let Err(err) = writer.finalize() {
-            self.fail(id, format!("cannot finish spool file: {err}"));
-            let _ = std::fs::remove_file(&segment.path);
-            return;
-        }
+        let audio = match writer.finish() {
+            Ok(audio) => audio,
+            Err(err) => {
+                self.fail(id, err);
+                return;
+            }
+        };
         let track = self
             .latest
             .get(&segment.track_id)
@@ -413,7 +409,7 @@ impl SegmentSink for SpoolSink {
         let _ = self.events.send(EngineEvent::SegmentEnded { id, partial });
         let _ = self.jobs.send(Job::Finalize(Box::new(FinalizeJob {
             id,
-            spool_path: segment.path,
+            audio,
             frames: segment.frames,
             peak: segment.peak,
             track,

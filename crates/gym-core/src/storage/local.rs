@@ -72,12 +72,7 @@ impl StorageProvider for LocalStorage {
     }
 
     fn display_location(&self) -> String {
-        if let Some(dirs) = directories::BaseDirs::new()
-            && let Ok(relative) = self.root.strip_prefix(dirs.home_dir())
-        {
-            return format!("~/{}", relative.display());
-        }
-        self.root.display().to_string()
+        crate::platform::display_path(&self.root)
     }
 
     fn store(

@@ -50,6 +50,16 @@ pub trait Platform: Send + Sync {
     fn open_privacy_settings(&self, pane: PrivacyPane) -> io::Result<()>;
 }
 
+/// `path` for display, with the home folder abbreviated to `~`.
+pub fn display_path(path: &Path) -> String {
+    if let Some(dirs) = directories::BaseDirs::new()
+        && let Ok(relative) = path.strip_prefix(dirs.home_dir())
+    {
+        return format!("~/{}", relative.display());
+    }
+    path.display().to_string()
+}
+
 /// Standard per-user application directories.
 #[derive(Clone, Debug)]
 pub struct AppDirs {

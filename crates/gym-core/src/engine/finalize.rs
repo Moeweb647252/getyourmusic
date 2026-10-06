@@ -1,23 +1,23 @@
-//! The finalize worker: spool WAV → (trim, resample) → encode → tag → storage → library.
+//! The finalize worker: cached audio → (trim, resample) → encode → tag → storage → library.
 
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::thread;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use crossbeam_channel::{Sender, unbounded};
 
-use crate::capture::PcmSpec;
 use crate::encode::{EncodeError, choose_sample_rate};
 use crate::library::RecordingEntry;
 use crate::model::NowPlaying;
-use crate::pcm::{PcmReader, WavFileReader, conform};
+use crate::pcm::{PcmReader, conform};
 use crate::settings::IncompletePolicy;
 use crate::storage::{StorageError, StoreOutcome};
 use crate::tags::{TagError, write_tags};
 
 use super::segmenter::SegmentId;
+use super::spool::SpoolData;
 use super::{EngineEvent, EngineServices, OutputConfig, PartialReason, SkipReason, StopReason};
 
 /// Segments whose peak never exceeds this (-80 dBFS) contain no audio.
@@ -32,7 +32,7 @@ const TRIM_MARGIN: Duration = Duration::from_millis(10);
 
 pub(super) struct FinalizeJob {
     pub id: SegmentId,
-    pub spool_path: PathBuf,
+    pub audio: SpoolData,
     pub frames: u64,
     /// Highest absolute sample value written to the segment.
     pub peak: f32,
@@ -108,11 +108,7 @@ fn process(job: &FinalizeJob, services: &EngineServices, events: &Sender<EngineE
             }
         }
     };
-    if let Err(err) = std::fs::remove_file(&job.spool_path)
-        && err.kind() != io::ErrorKind::NotFound
-    {
-        tracing::warn!(%err, "cannot remove spool file");
-    }
+    job.audio.remove();
     let _ = events.send(event);
 }
 
@@ -130,12 +126,10 @@ fn finalize(
         return Ok(Outcome::Skipped(SkipReason::Incomplete(reason)));
     }
 
-    let spec = WavFileReader::open(&job.spool_path, 0, None)?.spec();
-    let frames = job
-        .frames
-        .min(WavFileReader::open(&job.spool_path, 0, None)?.total_frames());
+    let spec = job.audio.spec();
+    let frames = job.frames.min(job.audio.total_frames()?);
     let (start, end) = if job.output.trim_silence {
-        audible_range(&job.spool_path, spec, frames)?
+        audible_range(&job.audio, frames)?
     } else {
         (0, frames)
     };
@@ -152,13 +146,12 @@ fn finalize(
         job.output.sample_rate.resolve(spec.sample_rate),
         encoder.supported_sample_rates(&settings),
     );
-    let source = Box::new(WavFileReader::open(&job.spool_path, start, Some(end))?);
-    let mut reader = conform(source, rate, encoder.max_channels())?;
+    let mut reader = conform(job.audio.reader(start, end)?, rate, encoder.max_channels())?;
     let out_spec = reader.spec();
     let out_frames = reader.total_frames();
 
     let extension = settings.format.extension();
-    let encoded = job.spool_path.with_extension(extension);
+    let encoded = job.audio.path().with_extension(extension);
     let result = encode_tag_store(job, services, events, &mut *reader, &encoded);
     if result.is_err() {
         let _ = std::fs::remove_file(&encoded);
@@ -223,7 +216,8 @@ fn encode_tag_store(
 }
 
 /// Frames `start..end` without leading and trailing digital silence (at most [`MAX_TRIM`] each).
-fn audible_range(path: &Path, spec: PcmSpec, frames: u64) -> Result<(u64, u64), EncodeError> {
+fn audible_range(audio: &SpoolData, frames: u64) -> Result<(u64, u64), EncodeError> {
+    let spec = audio.spec();
     let channels = spec.channels as usize;
     let max_trim = spec.duration_to_frames(MAX_TRIM).min(frames / 2);
     let margin = spec.duration_to_frames(TRIM_MARGIN);
@@ -231,7 +225,7 @@ fn audible_range(path: &Path, spec: PcmSpec, frames: u64) -> Result<(u64, u64), 
     let mut buf = vec![0.0f32; 4096 * channels];
 
     let mut start = max_trim;
-    let mut reader = WavFileReader::open(path, 0, Some(max_trim))?;
+    let mut reader = audio.reader(0, max_trim)?;
     let mut position = 0u64;
     'leading: loop {
         let n = reader.read(&mut buf)?;
@@ -249,7 +243,7 @@ fn audible_range(path: &Path, spec: PcmSpec, frames: u64) -> Result<(u64, u64), 
 
     let tail_start = frames.saturating_sub(max_trim).max(start);
     let mut end = tail_start;
-    let mut reader = WavFileReader::open(path, tail_start, Some(frames))?;
+    let mut reader = audio.reader(tail_start, frames)?;
     let mut position = tail_start;
     loop {
         let n = reader.read(&mut buf)?;
@@ -269,49 +263,52 @@ fn audible_range(path: &Path, spec: PcmSpec, frames: u64) -> Result<(u64, u64), 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::capture::PcmSpec;
+    use crate::engine::CacheConfig;
+    use crate::engine::spool::{MemoryBudget, SpoolWriter};
+    use crate::settings::CacheMode;
 
-    fn write_wav(path: &Path, samples: &[f32]) {
-        let spec = hound::WavSpec {
-            channels: 1,
+    fn spool(dir: &Path, name: &str, samples: &[f32], mode: CacheMode) -> SpoolData {
+        let spec = PcmSpec {
             sample_rate: 1_000,
-            bits_per_sample: 32,
-            sample_format: hound::SampleFormat::Float,
+            channels: 1,
         };
-        let mut writer = hound::WavWriter::create(path, spec).unwrap();
-        for &s in samples {
-            writer.write_sample(s).unwrap();
-        }
-        writer.finalize().unwrap();
+        let cache = CacheConfig {
+            mode,
+            ..Default::default()
+        };
+        let mut writer =
+            SpoolWriter::create(dir.join(name), spec, &cache, &MemoryBudget::new(None)).unwrap();
+        writer.write(samples).unwrap();
+        writer.finish().unwrap()
     }
 
     #[test]
     fn trims_edges_within_limits() {
         let dir = tempfile::tempdir().unwrap();
-        let spec = PcmSpec {
-            sample_rate: 1_000,
-            channels: 1,
-        };
+        for mode in [CacheMode::Disk, CacheMode::Memory] {
+            let mut samples = vec![0.0; 500];
+            samples.extend(std::iter::repeat_n(0.5, 9_000));
+            samples.extend(vec![0.0; 3_000]);
+            let audio = spool(dir.path(), "t.wav", &samples, mode);
+            let (start, end) = audible_range(&audio, samples.len() as u64).unwrap();
+            assert_eq!(
+                start, 490,
+                "leading silence is trimmed up to a 10 ms margin ({mode:?})"
+            );
+            assert_eq!(
+                end, 9_510,
+                "trailing silence is trimmed up to a 10 ms margin ({mode:?})"
+            );
 
-        let path = dir.path().join("t.wav");
-        let mut samples = vec![0.0; 500];
-        samples.extend(std::iter::repeat_n(0.5, 9_000));
-        samples.extend(vec![0.0; 3_000]);
-        write_wav(&path, &samples);
-        let (start, end) = audible_range(&path, spec, samples.len() as u64).unwrap();
-        assert_eq!(
-            start, 490,
-            "leading silence is trimmed up to a 10 ms margin"
-        );
-        assert_eq!(
-            end, 9_510,
-            "trailing silence is trimmed up to a 10 ms margin"
-        );
-
-        let long_path = dir.path().join("long.wav");
-        let mut long = vec![0.5; 20_000];
-        long.extend(vec![0.0; 7_000]);
-        write_wav(&long_path, &long);
-        let (_, end) = audible_range(&long_path, spec, long.len() as u64).unwrap();
-        assert_eq!(end, 22_010, "at most 5 s of trailing silence is trimmed");
+            let mut long = vec![0.5; 20_000];
+            long.extend(vec![0.0; 7_000]);
+            let audio = spool(dir.path(), "long.wav", &long, mode);
+            let (_, end) = audible_range(&audio, long.len() as u64).unwrap();
+            assert_eq!(
+                end, 22_010,
+                "at most 5 s of trailing silence is trimmed ({mode:?})"
+            );
+        }
     }
 }

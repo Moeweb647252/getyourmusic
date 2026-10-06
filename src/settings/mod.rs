@@ -2,14 +2,17 @@
 //!
 //! Every field reads from and writes to [`SettingsStore`]; observers apply the changes.
 
+use std::path::PathBuf;
+
 use gpui_kit::component::{
     ActiveTheme as _, Icon, IconName, Sizable as _, Theme, ThemeMode,
     button::{Button, ButtonVariants as _},
     group_box::GroupBoxVariant,
     h_flex,
-    setting::{SettingField, SettingGroup, SettingItem, SettingPage, Settings},
+    setting::{NumberFieldOptions, SettingField, SettingGroup, SettingItem, SettingPage, Settings},
     v_flex,
 };
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     App, Axis, Context, FontWeight, IntoElement, ParentElement as _, PathPromptOptions, Render,
     SharedString, Styled as _, Window, div,
@@ -19,7 +22,10 @@ use gym_core::capture::CaptureSource;
 use gym_core::encode::{AacBitrate, BitDepth, M4aCodec, Mp3Quality, OutputFormat};
 use gym_core::model::{PlayerInfo, TrackMetadata};
 use gym_core::naming::{NamingFallbacks, NamingTemplate, TemplateError};
-use gym_core::settings::{AppSettings, IncompletePolicy, SampleRatePolicy, ThemePreference};
+use gym_core::platform::display_path;
+use gym_core::settings::{
+    AppSettings, CacheMode, IncompletePolicy, MemoryOverflow, SampleRatePolicy, ThemePreference,
+};
 use gym_core::storage::ConflictPolicy;
 
 use crate::display;
@@ -28,6 +34,9 @@ use crate::services::Services;
 use crate::settings_store::SettingsStore;
 
 type Options = Vec<(SharedString, SharedString)>;
+
+/// Largest accepted memory limit, in MiB.
+const MAX_MEMORY_LIMIT_MB: u32 = 64 * 1024;
 
 /// Applies the theme preference to the window.
 pub fn apply_theme(window: &mut Window, cx: &mut App) {
@@ -488,12 +497,15 @@ impl SettingsView {
     }
 
     fn storage_page(&self, cx: &App) -> SettingPage {
+        let defaults = AppSettings::default();
         let services = Services::global(cx);
-        let folder = services.music_folder(SettingsStore::get(cx));
-        let storage = services.storage(SettingsStore::get(cx));
+        let settings = SettingsStore::get(cx);
+        let storage = services.storage(settings);
         let free = storage
             .available_space()
             .map(|bytes| tr!("status.free_space", size = display::bytes(bytes)));
+        let cache_folder = services.cache_folder(settings);
+        let in_memory = settings.cache.mode == CacheMode::Memory;
 
         SettingPage::new(tr!("settings.page.storage"))
             .icon(Icon::new(IconName::HardDrive))
@@ -512,41 +524,96 @@ impl SettingsView {
                         .description(tr!("settings.storage.description")),
                         SettingItem::new(
                             tr!("settings.folder.title"),
-                            SettingField::render(move |options, _, cx| {
-                                let folder = folder.clone();
-                                h_flex()
-                                    .gap_2()
-                                    .child(
-                                        div()
-                                            .max_w_80()
-                                            .truncate()
-                                            .text_sm()
-                                            .text_color(cx.theme().muted_foreground)
-                                            .child(storage.display_location()),
-                                    )
-                                    .child(
-                                        Button::new("choose-folder")
-                                            .outline()
-                                            .with_size(options.size())
-                                            .label(tr!("settings.folder.choose"))
-                                            .on_click(|_, _, cx| choose_folder(cx)),
-                                    )
-                                    .child(
-                                        Button::new("reveal-folder")
-                                            .ghost()
-                                            .with_size(options.size())
-                                            .icon(IconName::FolderOpen)
-                                            .tooltip(tr!("action.reveal"))
-                                            .accessibility_label(tr!("action.reveal"))
-                                            .on_click(move |_, _, cx| {
-                                                let _ = Services::global(cx)
-                                                    .platform
-                                                    .open_folder(&folder);
-                                            }),
-                                    )
-                            }),
+                            folder_field(
+                                "music-folder",
+                                services.music_folder(settings),
+                                storage.display_location(),
+                                settings.storage.local_folder.is_some(),
+                                |s, folder| s.storage.local_folder = folder,
+                            ),
                         )
                         .description(free.unwrap_or_default()),
+                    ]),
+            )
+            .group(
+                SettingGroup::new()
+                    .title(tr!("settings.group.cache"))
+                    .items(vec![
+                        SettingItem::new(
+                            tr!("settings.cache_mode.title"),
+                            dropdown(
+                                vec![
+                                    (CacheMode::Disk, "disk", tr!("settings.cache_mode.disk")),
+                                    (
+                                        CacheMode::Memory,
+                                        "memory",
+                                        tr!("settings.cache_mode.memory"),
+                                    ),
+                                ],
+                                |s| s.cache.mode,
+                                |s, v| s.cache.mode = v,
+                                defaults.cache.mode,
+                            ),
+                        )
+                        .description(tr!("settings.cache_mode.description")),
+                        SettingItem::new(
+                            tr!("settings.memory_limit.title"),
+                            SettingField::number_input(
+                                NumberFieldOptions {
+                                    min: 0.0,
+                                    max: MAX_MEMORY_LIMIT_MB as f64,
+                                    step: 256.0,
+                                },
+                                |cx: &App| SettingsStore::get(cx).cache.memory_limit_mb as f64,
+                                |value: f64, cx: &mut App| {
+                                    let mb = value.round().clamp(0.0, MAX_MEMORY_LIMIT_MB as f64);
+                                    SettingsStore::update(cx, |s| {
+                                        s.cache.memory_limit_mb = mb as u32
+                                    });
+                                },
+                            )
+                            .default_value(defaults.cache.memory_limit_mb as f64),
+                        )
+                        .description(tr!("settings.memory_limit.description"))
+                        .disabled(!in_memory),
+                        SettingItem::new(
+                            tr!("settings.memory_overflow.title"),
+                            dropdown(
+                                vec![
+                                    (
+                                        MemoryOverflow::SpillToDisk,
+                                        "spill_to_disk",
+                                        tr!("settings.memory_overflow.spill_to_disk"),
+                                    ),
+                                    (
+                                        MemoryOverflow::Fail,
+                                        "fail",
+                                        tr!("settings.memory_overflow.fail"),
+                                    ),
+                                ],
+                                |s| s.cache.on_overflow,
+                                |s, v| s.cache.on_overflow = v,
+                                defaults.cache.on_overflow,
+                            ),
+                        )
+                        .disabled(!in_memory),
+                        SettingItem::new(
+                            tr!("settings.cache_folder.title"),
+                            folder_field(
+                                "cache-folder",
+                                cache_folder.clone(),
+                                display_path(&cache_folder),
+                                settings.cache.folder.is_some(),
+                                |s, folder| s.cache.folder = folder,
+                            )
+                            .on_reset(
+                                |cx: &App| SettingsStore::get(cx).cache.folder.is_some(),
+                                |_, cx: &mut App| {
+                                    SettingsStore::update(cx, |s| s.cache.folder = None)
+                                },
+                            ),
+                        )
+                        .description(tr!("settings.cache_folder.description")),
                     ]),
             )
     }
@@ -724,7 +791,58 @@ fn template_error(error: &TemplateError) -> String {
     error.to_string()
 }
 
-fn choose_folder(cx: &mut App) {
+/// A folder with buttons to choose another, go back to the default and reveal it.
+fn folder_field(
+    id: &'static str,
+    folder: PathBuf,
+    location: String,
+    is_custom: bool,
+    set: fn(&mut AppSettings, Option<PathBuf>),
+) -> SettingField<SharedString> {
+    SettingField::render(move |options, _, cx| {
+        let folder = folder.clone();
+        h_flex()
+            .gap_2()
+            .child(
+                div()
+                    .max_w_80()
+                    .truncate()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(location.clone()),
+            )
+            .child(
+                Button::new(SharedString::from(format!("{id}-choose")))
+                    .outline()
+                    .with_size(options.size())
+                    .label(tr!("settings.folder.choose"))
+                    .on_click(move |_, _, cx| choose_folder(set, cx)),
+            )
+            .when(is_custom, |row| {
+                row.child(
+                    Button::new(SharedString::from(format!("{id}-default")))
+                        .ghost()
+                        .with_size(options.size())
+                        .label(tr!("settings.folder.use_default"))
+                        .on_click(move |_, _, cx| SettingsStore::update(cx, |s| set(s, None))),
+                )
+            })
+            .child(
+                Button::new(SharedString::from(format!("{id}-reveal")))
+                    .ghost()
+                    .with_size(options.size())
+                    .icon(IconName::FolderOpen)
+                    .tooltip(tr!("action.reveal"))
+                    .accessibility_label(tr!("action.reveal"))
+                    .on_click(move |_, _, cx| {
+                        let _ = std::fs::create_dir_all(&folder);
+                        let _ = Services::global(cx).platform.open_folder(&folder);
+                    }),
+            )
+    })
+}
+
+fn choose_folder(set: fn(&mut AppSettings, Option<PathBuf>), cx: &mut App) {
     let paths = cx.prompt_for_paths(PathPromptOptions {
         files: false,
         directories: true,
@@ -736,7 +854,7 @@ fn choose_folder(cx: &mut App) {
             && let Some(folder) = paths.pop()
         {
             cx.update(|cx| {
-                SettingsStore::update(cx, |s| s.storage.local_folder = Some(folder));
+                SettingsStore::update(cx, |s| set(s, Some(folder)));
             });
         }
     })
