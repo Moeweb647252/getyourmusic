@@ -19,7 +19,9 @@ use gpui_kit::{
 };
 
 use gym_core::capture::CaptureSource;
-use gym_core::encode::{AacBitrate, BitDepth, M4aCodec, Mp3Quality, OutputFormat};
+use gym_core::encode::{
+    AacBitrate, BitDepth, DEFAULT_FLAC_LEVEL, M4aCodec, MAX_FLAC_LEVEL, Mp3Quality, OutputFormat,
+};
 use gym_core::model::{PlayerInfo, TrackMetadata};
 use gym_core::naming::{NamingFallbacks, NamingTemplate, TemplateError};
 use gym_core::platform::display_path;
@@ -34,6 +36,10 @@ use crate::services::Services;
 use crate::settings_store::SettingsStore;
 
 type Options = Vec<(SharedString, SharedString)>;
+
+/// Dropdown keys for FLAC compression levels `0..=MAX_FLAC_LEVEL`.
+const FLAC_LEVEL_KEYS: [&str; MAX_FLAC_LEVEL as usize + 1] =
+    ["0", "1", "2", "3", "4", "5", "6", "7", "8"];
 
 /// Largest accepted memory limit, in MiB.
 const MAX_MEMORY_LIMIT_MB: u32 = 64 * 1024;
@@ -354,6 +360,31 @@ impl SettingsView {
                         )
                         .description(tr!("settings.bit_depth.description"))
                         .disabled(!lossless),
+                        SettingItem::new(
+                            tr!("settings.flac_level.title"),
+                            dropdown(
+                                (0..=MAX_FLAC_LEVEL)
+                                    .map(|level| {
+                                        let label = match level {
+                                            0 => tr!("settings.flac_level.fastest", level = level),
+                                            DEFAULT_FLAC_LEVEL => {
+                                                tr!("settings.flac_level.default", level = level)
+                                            }
+                                            MAX_FLAC_LEVEL => {
+                                                tr!("settings.flac_level.smallest", level = level)
+                                            }
+                                            _ => level.to_string().into(),
+                                        };
+                                        (level, FLAC_LEVEL_KEYS[level as usize], label)
+                                    })
+                                    .collect(),
+                                |s| s.output.encode.flac_level,
+                                |s, v| s.output.encode.flac_level = v,
+                                defaults.output.encode.flac_level,
+                            ),
+                        )
+                        .description(tr!("settings.flac_level.description"))
+                        .disabled(format != OutputFormat::Flac),
                         SettingItem::new(
                             tr!("settings.mp3_quality.title"),
                             dropdown(

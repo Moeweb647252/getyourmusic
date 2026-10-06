@@ -6,10 +6,11 @@ use std::path::Path;
 
 use flacenc::bitsink::ByteSink;
 use flacenc::component::{BitRepr, StreamInfo};
-use flacenc::error::Verify;
+use flacenc::config;
+use flacenc::error::{Verified, Verify};
 use flacenc::source::{Context, Fill, FrameBuf};
 
-use gym_core::encode::{AudioEncoder, EncodeError, EncodeSettings, OutputFormat};
+use gym_core::encode::{AudioEncoder, EncodeError, EncodeSettings, MAX_FLAC_LEVEL, OutputFormat};
 use gym_core::pcm::{PcmReader, Quantizer};
 
 const BLOCK_SIZE: usize = 4096;
@@ -21,6 +22,41 @@ pub struct FlacEncoder;
 
 fn encoder_error(error: impl std::fmt::Debug) -> EncodeError {
     EncodeError::Encoder(format!("flac: {error:?}"))
+}
+
+/// Encoder configurations for a compression level; each frame keeps the smallest result.
+///
+/// flacenc has no presets, and the best LPC order depends on the material (a higher order can
+/// make a file bigger). Levels up to 5 (flacenc's default) raise a single order; above that each
+/// level tries a superset of the orders below it, so it never produces a bigger file.
+fn level_configs(level: u8) -> Result<Vec<Verified<config::Encoder>>, EncodeError> {
+    let lpc_orders: &[usize] = match level.min(MAX_FLAC_LEVEL) {
+        0 => &[],
+        1 => &[2],
+        2 => &[4],
+        3 => &[6],
+        4 => &[8],
+        5 => &[10],
+        6 => &[10, 12],
+        7 => &[8, 10, 12, 16],
+        _ => &[6, 8, 10, 12, 16, 20, 24],
+    };
+    let verify =
+        |config: config::Encoder| config.into_verified().map_err(|(_, e)| encoder_error(e));
+    if lpc_orders.is_empty() {
+        // Fixed predictors only.
+        let mut config = config::Encoder::default();
+        config.subframe_coding.use_lpc = false;
+        return Ok(vec![verify(config)?]);
+    }
+    lpc_orders
+        .iter()
+        .map(|&order| {
+            let mut config = config::Encoder::default();
+            config.subframe_coding.qlpc.lpc_order = order;
+            verify(config)
+        })
+        .collect()
 }
 
 /// Serializes the stream header with STREAMINFO as the only (last) metadata block.
@@ -58,9 +94,7 @@ impl AudioEncoder for FlacEncoder {
         let bits = settings.bit_depth.bits() as usize;
         let total = input.total_frames().max(1) as f32;
 
-        let config = flacenc::config::Encoder::default()
-            .into_verified()
-            .map_err(|(_, e)| encoder_error(e))?;
+        let configs = level_configs(settings.flac_level)?;
         let mut info =
             StreamInfo::new(spec.sample_rate as usize, channels, bits).map_err(encoder_error)?;
         let mut fill = (
@@ -94,8 +128,17 @@ impl AudioEncoder for FlacEncoder {
             fill.fill_interleaved(&ints).map_err(encoder_error)?;
 
             let frame_number = fill.1.current_frame_number().unwrap_or(0);
-            let frame = flacenc::encode_fixed_size_frame(&config, &fill.0, frame_number, &info)
-                .map_err(encoder_error)?;
+            let encode = |config| {
+                flacenc::encode_fixed_size_frame(config, &fill.0, frame_number, &info)
+                    .map_err(encoder_error)
+            };
+            let mut frame = encode(&configs[0])?;
+            for config in &configs[1..] {
+                let candidate = encode(config)?;
+                if candidate.count_bits() < frame.count_bits() {
+                    frame = candidate;
+                }
+            }
             info.update_frame_info(&frame);
             sink.clear();
             frame.write(&mut sink).map_err(encoder_error)?;

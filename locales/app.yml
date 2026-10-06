@@ -380,6 +380,17 @@ settings:
       en: Used for FLAC and ALAC.
     bits:
       en: "%{bits}-bit"
+  flac_level:
+    title:
+      en: FLAC compression
+    description:
+      en: Higher levels make smaller files but take longer to encode. Every level is lossless.
+    fastest:
+      en: "%{level} (fastest)"
+    default:
+      en: "%{level} (default)"
+    smallest:
+      en: "%{level} (smallest)"
   mp3_quality:
     title:
       en: MP3 quality

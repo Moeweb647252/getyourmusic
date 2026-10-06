@@ -5,7 +5,10 @@ use lofty::file::{AudioFile, TaggedFileExt};
 use lofty::tag::Accessor;
 
 use gym_core::capture::PcmSpec;
-use gym_core::encode::{AudioEncoder, BitDepth, EncodeSettings, Mp3Quality, OutputFormat};
+use gym_core::encode::{
+    AudioEncoder, BitDepth, DEFAULT_FLAC_LEVEL, EncodeSettings, MAX_FLAC_LEVEL, Mp3Quality,
+    OutputFormat,
+};
 use gym_core::model::{Artwork, PlayerInfo, TrackMetadata};
 use gym_core::pcm::{SliceReader, conform};
 use gym_core::tags::write_tags;
@@ -108,6 +111,32 @@ fn flac_round_trip_16_bit() {
     };
     encode(&FlacEncoder, &settings, spec, &path);
     assert_file(&path, 44_100, Some(16));
+}
+
+#[test]
+fn flac_levels_make_valid_files_that_never_grow() {
+    let dir = tempfile::tempdir().unwrap();
+    let spec = PcmSpec {
+        sample_rate: 44_100,
+        channels: 2,
+    };
+    // 24-bit, so no random dither makes sizes differ between runs.
+    let sizes: Vec<u64> = [0, DEFAULT_FLAC_LEVEL, 6, 7, MAX_FLAC_LEVEL]
+        .into_iter()
+        .map(|level| {
+            let path = dir.path().join(format!("t{level}.flac"));
+            let settings = EncodeSettings {
+                format: OutputFormat::Flac,
+                bit_depth: BitDepth::Bits24,
+                flac_level: level,
+                ..Default::default()
+            };
+            encode(&FlacEncoder, &settings, spec, &path);
+            assert_file(&path, 44_100, Some(24));
+            std::fs::metadata(&path).unwrap().len()
+        })
+        .collect();
+    assert!(sizes.windows(2).all(|w| w[1] <= w[0]), "{sizes:?}");
 }
 
 #[test]

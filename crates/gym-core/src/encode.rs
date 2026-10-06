@@ -45,6 +45,10 @@ impl BitDepth {
     }
 }
 
+/// Highest FLAC compression level; levels run from 0 (fastest) to this (smallest files).
+pub const MAX_FLAC_LEVEL: u8 = 8;
+pub const DEFAULT_FLAC_LEVEL: u8 = 5;
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Mp3Quality {
@@ -113,6 +117,8 @@ pub struct EncodeSettings {
     pub format: OutputFormat,
     /// Used by FLAC and ALAC.
     pub bit_depth: BitDepth,
+    /// FLAC compression level, `0..=MAX_FLAC_LEVEL`. Every level is lossless.
+    pub flac_level: u8,
     pub mp3_quality: Mp3Quality,
     pub m4a_codec: M4aCodec,
     pub aac_bitrate: AacBitrate,
@@ -123,6 +129,7 @@ impl Default for EncodeSettings {
         Self {
             format: OutputFormat::Flac,
             bit_depth: BitDepth::default(),
+            flac_level: DEFAULT_FLAC_LEVEL,
             mp3_quality: Mp3Quality::default(),
             m4a_codec: M4aCodec::default(),
             aac_bitrate: AacBitrate::default(),
