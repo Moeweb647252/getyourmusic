@@ -17,6 +17,7 @@ use gym_core::engine::StopReason;
 
 use crate::actions::{Quit, ShowLibrary, ShowRecorder, ShowSettings, ToggleRecording};
 use crate::app_window::{AppWindow, Page};
+use crate::services::Services;
 use crate::session::{RecordingSession, SessionEvent};
 use crate::settings;
 use crate::settings_store::SettingsStore;
@@ -50,6 +51,13 @@ impl Shell {
                 Self::on_session_event(event, cx)
             }),
             cx.on_window_closed(|cx, window_id| Self::on_window_closed(window_id, cx)),
+            // gpui exits without running destructors; stop helper processes explicitly.
+            cx.on_app_quit(|cx| {
+                if let Ok(monitor) = &Services::global(cx).now_playing {
+                    monitor.shutdown();
+                }
+                async {}
+            }),
         ];
         cx.set_global(Self {
             session,

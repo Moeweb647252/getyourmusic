@@ -116,6 +116,7 @@ impl Drop for StreamGuard {
 
 impl NowPlayingSource for AdapterNowPlaying {
     fn start(&self, sink: Sender<NowPlayingEvent>) -> Result<Subscription, NowPlayingError> {
+        reap_orphaned_helpers();
         self.self_test()?;
         let stop = Arc::new(AtomicBool::new(false));
         let child = Arc::new(Mutex::new(None));
@@ -137,6 +138,30 @@ impl NowPlayingSource for AdapterNowPlaying {
             child,
             supervisor: Some(supervisor),
         }))
+    }
+}
+
+/// Stops helpers left behind by an earlier GetYourMusic process that crashed or was killed.
+///
+/// Only processes whose parent has exited (re-parented to launchd, pid 1) and that run the
+/// script from a GetYourMusic app bundle are touched.
+fn reap_orphaned_helpers() {
+    let Ok(output) = Command::new("/bin/ps")
+        .args(["-axo", "pid=,ppid=,args="])
+        .output()
+    else {
+        return;
+    };
+    let marker = format!("GetYourMusic.app/Contents/Resources/{SCRIPT_NAME}");
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let mut fields = line.split_whitespace();
+        let (Some(pid), Some(ppid)) = (fields.next(), fields.next()) else {
+            continue;
+        };
+        if ppid == "1" && line.contains(PERL) && line.contains(&marker) {
+            tracing::info!(pid, "stopping an orphaned now playing helper");
+            let _ = Command::new("/bin/kill").arg(pid).status();
+        }
     }
 }
 

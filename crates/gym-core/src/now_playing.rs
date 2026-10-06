@@ -55,7 +55,7 @@ struct MonitorState {
 #[derive(Clone)]
 pub struct NowPlayingMonitor {
     state: Arc<Mutex<MonitorState>>,
-    _subscription: Arc<Subscription>,
+    subscription: Arc<Mutex<Option<Subscription>>>,
 }
 
 impl NowPlayingMonitor {
@@ -73,7 +73,7 @@ impl NowPlayingMonitor {
             .spawn(move || Self::dispatch(rx, dispatch_state))?;
         Ok(Self {
             state,
-            _subscription: Arc::new(subscription),
+            subscription: Arc::new(Mutex::new(Some(subscription))),
         })
     }
 
@@ -96,6 +96,14 @@ impl NowPlayingMonitor {
                 .subscribers
                 .retain(|subscriber| subscriber.send(event.clone()).is_ok());
         }
+    }
+
+    /// Stops the source (e.g. its helper process) for every clone of this monitor.
+    ///
+    /// Call before the process exits: exiting does not run destructors.
+    pub fn shutdown(&self) {
+        let subscription = self.subscription.lock().unwrap().take();
+        drop(subscription);
     }
 
     /// The latest snapshot, if anything is playing.
