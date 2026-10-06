@@ -168,6 +168,37 @@ impl RecordingsTable {
     }
 }
 
+/// Forgets a recording stored elsewhere, such as on a server; the file itself stays.
+fn remove_from_library(
+    entry: &RecordingEntry,
+    table: &WeakEntity<TableState<RecordingsTable>>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let services = Services::global(cx);
+    let title = entry.track.title.clone();
+    match services.library.remove(entry.id) {
+        Ok(_) => {
+            let entries = services.library.entries();
+            let _ = table.update(cx, |table, cx| {
+                table.delegate_mut().set_entries(entries);
+                table.refresh(cx);
+            });
+            window.push_notification(
+                Notification::info(tr!("toast.removed_from_library", title = title)),
+                cx,
+            );
+        }
+        Err(err) => {
+            tracing::error!(%err, "cannot remove a recording from the library");
+            window.push_notification(
+                Notification::error(tr!("toast.remove_failed", title = title)),
+                cx,
+            );
+        }
+    }
+}
+
 /// Moves a recording to the Trash and removes it from the library.
 fn move_to_trash(
     entry: &RecordingEntry,
@@ -176,11 +207,12 @@ fn move_to_trash(
     cx: &mut App,
 ) {
     let services = Services::global(cx);
-    let storage = services.storage(SettingsStore::get(cx));
-    let result = match storage.local_path(&entry.key) {
+    let path = services
+        .storage_for(&entry.provider_id, SettingsStore::get(cx))
+        .and_then(|storage| storage.local_path(&entry.key));
+    let result = match path {
         Some(path) if path.exists() => services.platform.move_to_trash(&path),
-        Some(_) => Ok(()),
-        None => storage.delete(&entry.key).map_err(std::io::Error::other),
+        _ => Ok(()),
     };
     let title = entry.track.title.clone();
     match result.and_then(|()| services.library.remove(entry.id).map(|_| ())) {
@@ -268,21 +300,26 @@ impl TableDelegate for RecordingsTable {
             return menu;
         };
         let table = cx.entity().downgrade();
-        let path = Services::global(cx)
-            .storage(SettingsStore::get(cx))
-            .local_path(&entry.key);
+        let storage = Services::global(cx).storage_for(&entry.provider_id, SettingsStore::get(cx));
+        let path = storage
+            .as_ref()
+            .and_then(|storage| storage.local_path(&entry.key));
+        // Recordings on a server can't be opened, revealed or trashed from here.
+        let local = path.is_some();
         let open_path = path.clone();
         let reveal_path = path.clone();
         menu.item(
-            PopupMenuItem::new(tr!("action.open")).on_click(move |_, window, cx| {
-                let opened = open_path
-                    .as_ref()
-                    .filter(|p| p.exists())
-                    .map(|p| Services::global(cx).platform.open_file(p));
-                if !matches!(opened, Some(Ok(()))) {
-                    window.push_notification(Notification::error(tr!("toast.open_failed")), cx);
-                }
-            }),
+            PopupMenuItem::new(tr!("action.open"))
+                .disabled(!local)
+                .on_click(move |_, window, cx| {
+                    let opened = open_path
+                        .as_ref()
+                        .filter(|p| p.exists())
+                        .map(|p| Services::global(cx).platform.open_file(p));
+                    if !matches!(opened, Some(Ok(()))) {
+                        window.push_notification(Notification::error(tr!("toast.open_failed")), cx);
+                    }
+                }),
         )
         .item(
             PopupMenuItem::new(tr!("action.reveal"))
@@ -306,11 +343,15 @@ impl TableDelegate for RecordingsTable {
                 }),
         )
         .separator()
-        .item(
+        .item(if local {
             PopupMenuItem::new(tr!("action.move_to_trash")).on_click(move |_, window, cx| {
                 move_to_trash(&entry, &table, window, cx);
-            }),
-        )
+            })
+        } else {
+            PopupMenuItem::new(tr!("action.remove_from_library")).on_click(move |_, window, cx| {
+                remove_from_library(&entry, &table, window, cx);
+            })
+        })
     }
 
     fn render_empty(

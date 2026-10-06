@@ -6,7 +6,7 @@ publish.workspace = true
 description = "Platform-independent domain model, abstractions and recording engine for GetYourMusic."
 
 [features]
-testing = []
+testing = ["dep:tiny_http"]
 
 [dependencies]
 chrono.workspace = true
@@ -14,12 +14,16 @@ crossbeam-channel.workspace = true
 directories.workspace = true
 hound.workspace = true
 lofty.workspace = true
+percent-encoding.workspace = true
 rtrb.workspace = true
 rubato.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+tiny_http = { workspace = true, optional = true }
 tracing.workspace = true
+ureq.workspace = true
+url.workspace = true
 uuid.workspace = true
 
 [target.'cfg(unix)'.dependencies]
@@ -27,3 +31,4 @@ libc = "0.2"
 
 [dev-dependencies]
 tempfile.workspace = true
+tiny_http.workspace = true

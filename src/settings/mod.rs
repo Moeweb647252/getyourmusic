@@ -5,17 +5,18 @@
 use std::path::PathBuf;
 
 use gpui_kit::component::{
-    ActiveTheme as _, Icon, IconName, Sizable as _, Theme, ThemeMode,
+    ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, Theme, ThemeMode,
     button::{Button, ButtonVariants as _},
     group_box::GroupBoxVariant,
     h_flex,
+    input::{Input, InputEvent, InputState},
     setting::{NumberFieldOptions, SettingField, SettingGroup, SettingItem, SettingPage, Settings},
     v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    App, Axis, Context, FontWeight, IntoElement, ParentElement as _, PathPromptOptions, Render,
-    SharedString, Styled as _, Window, div,
+    App, AppContext as _, Axis, Context, FontWeight, IntoElement, ParentElement as _,
+    PathPromptOptions, Render, SharedString, Styled as _, Window, div,
 };
 
 use gym_core::capture::CaptureSource;
@@ -26,13 +27,14 @@ use gym_core::model::{PlayerInfo, TrackMetadata};
 use gym_core::naming::{NamingFallbacks, NamingTemplate, TemplateError};
 use gym_core::platform::display_path;
 use gym_core::settings::{
-    AppSettings, CacheMode, IncompletePolicy, MemoryOverflow, SampleRatePolicy, ThemePreference,
+    AppSettings, CacheMode, IncompletePolicy, MemoryOverflow, SampleRatePolicy,
+    StorageProviderKind, ThemePreference,
 };
-use gym_core::storage::ConflictPolicy;
+use gym_core::storage::{ConflictPolicy, NekostorageLocation};
 
 use crate::display;
 use crate::i18n::LANGUAGES;
-use crate::services::Services;
+use crate::services::{Services, StorageStatus};
 use crate::settings_store::SettingsStore;
 
 type Options = Vec<(SharedString, SharedString)>;
@@ -111,6 +113,8 @@ impl SettingsView {
             .capture_backend()
             .list_sources()
             .unwrap_or_default();
+        // Shows current reachability and space for the destination.
+        Services::check_storage(cx);
         cx.notify();
     }
 
@@ -532,39 +536,58 @@ impl SettingsView {
         let services = Services::global(cx);
         let settings = SettingsStore::get(cx);
         let storage = services.storage(settings);
-        let free = storage
-            .available_space()
+        let free = services
+            .free_space(settings)
             .map(|bytes| tr!("status.free_space", size = display::bytes(bytes)));
         let cache_folder = services.cache_folder(settings);
         let in_memory = settings.cache.mode == CacheMode::Memory;
+
+        let mut location = vec![
+            SettingItem::new(
+                tr!("settings.storage.title"),
+                dropdown(
+                    vec![
+                        (
+                            StorageProviderKind::Local,
+                            "local",
+                            tr!("settings.storage.local"),
+                        ),
+                        (
+                            StorageProviderKind::Nekostorage,
+                            "nekostorage",
+                            tr!("settings.storage.nekostorage"),
+                        ),
+                    ],
+                    |s| s.storage.provider,
+                    |s, v| s.storage.provider = v,
+                    defaults.storage.provider,
+                ),
+            )
+            .description(tr!("settings.storage.description")),
+        ];
+        match settings.storage.provider {
+            StorageProviderKind::Local => location.push(
+                SettingItem::new(
+                    tr!("settings.folder.title"),
+                    folder_field(
+                        "music-folder",
+                        services.music_folder(settings),
+                        storage.display_location(),
+                        settings.storage.local_folder.is_some(),
+                        |s, folder| s.storage.local_folder = folder,
+                    ),
+                )
+                .description(free.unwrap_or_default()),
+            ),
+            StorageProviderKind::Nekostorage => location.extend(nekostorage_items(free, cx)),
+        }
 
         SettingPage::new(tr!("settings.page.storage"))
             .icon(Icon::new(IconName::HardDrive))
             .group(
                 SettingGroup::new()
                     .title(tr!("settings.group.location"))
-                    .items(vec![
-                        SettingItem::new(
-                            tr!("settings.storage.title"),
-                            SettingField::dropdown(
-                                vec![("local".into(), tr!("settings.storage.local"))],
-                                |_: &App| "local".into(),
-                                |_: SharedString, _: &mut App| {},
-                            ),
-                        )
-                        .description(tr!("settings.storage.description")),
-                        SettingItem::new(
-                            tr!("settings.folder.title"),
-                            folder_field(
-                                "music-folder",
-                                services.music_folder(settings),
-                                storage.display_location(),
-                                settings.storage.local_folder.is_some(),
-                                |s, folder| s.storage.local_folder = folder,
-                            ),
-                        )
-                        .description(free.unwrap_or_default()),
-                    ]),
+                    .items(location),
             )
             .group(
                 SettingGroup::new()
@@ -820,6 +843,128 @@ impl SettingsView {
 fn template_error(error: &TemplateError) -> String {
     // The core's messages are English diagnostics; they are short and name the placeholder.
     error.to_string()
+}
+
+/// Address, token, folder (with the space left) and connection status of a nekostorage server.
+fn nekostorage_items(free: Option<SharedString>, cx: &App) -> Vec<SettingItem> {
+    let settings = SettingsStore::get(cx);
+    let parsed = NekostorageLocation::parse(&settings.storage.nekostorage);
+    let mut url_description = tr!("settings.nekostorage.url_description").to_string();
+    if parsed
+        .as_ref()
+        .is_ok_and(NekostorageLocation::is_unencrypted)
+    {
+        url_description.push('\n');
+        url_description.push_str(&tr!("settings.nekostorage.unencrypted"));
+    }
+    let mut folder_description = tr!("settings.nekostorage.folder_description").to_string();
+    if let Some(free) = free {
+        folder_description.push('\n');
+        folder_description.push_str(&free);
+    }
+    let status = Services::global(cx).storage_status(settings);
+    let checking = matches!(status, Some(StorageStatus::Checking));
+    let (status, failed): (SharedString, bool) = match (&parsed, status) {
+        (Err(err), _) => (tr!("settings.nekostorage.invalid", error = err), true),
+        (Ok(_), Some(StorageStatus::Checking)) => (tr!("settings.nekostorage.checking"), false),
+        (Ok(_), Some(StorageStatus::Reachable)) => (tr!("settings.nekostorage.connected"), false),
+        (Ok(_), Some(StorageStatus::Failed(err))) => (err, true),
+        (Ok(_), None) => (SharedString::default(), false),
+    };
+    let can_check = parsed.is_ok() && !checking;
+
+    vec![
+        SettingItem::new(
+            tr!("settings.nekostorage.url_title"),
+            SettingField::input(
+                |cx: &App| {
+                    SettingsStore::get(cx)
+                        .storage
+                        .nekostorage
+                        .url
+                        .clone()
+                        .into()
+                },
+                |value: SharedString, cx: &mut App| {
+                    SettingsStore::update(cx, |s| s.storage.nekostorage.url = value.to_string())
+                },
+            ),
+        )
+        .layout(Axis::Vertical)
+        .description(url_description),
+        SettingItem::new(tr!("settings.nekostorage.token_title"), token_field())
+            .description(tr!("settings.nekostorage.token_description")),
+        SettingItem::new(
+            tr!("settings.nekostorage.folder_title"),
+            SettingField::input(
+                |cx: &App| {
+                    SettingsStore::get(cx)
+                        .storage
+                        .nekostorage
+                        .folder
+                        .clone()
+                        .into()
+                },
+                |value: SharedString, cx: &mut App| {
+                    SettingsStore::update(cx, |s| s.storage.nekostorage.folder = value.to_string())
+                },
+            ),
+        )
+        .description(folder_description),
+        SettingItem::new(
+            tr!("settings.nekostorage.connection_title"),
+            SettingField::render(move |options, _, cx| {
+                let color = if failed {
+                    cx.theme().danger
+                } else {
+                    cx.theme().muted_foreground
+                };
+                h_flex()
+                    .gap_2()
+                    .child(
+                        div()
+                            .max_w_80()
+                            .text_sm()
+                            .text_color(color)
+                            .child(status.clone()),
+                    )
+                    .child(
+                        Button::new("nekostorage-check")
+                            .outline()
+                            .with_size(options.size())
+                            .label(tr!("settings.nekostorage.check"))
+                            .disabled(!can_check)
+                            .on_click(|_, _, cx| Services::check_storage(cx)),
+                    )
+            }),
+        ),
+    ]
+}
+
+/// A masked input for the nekostorage token.
+fn token_field() -> SettingField<SharedString> {
+    SettingField::render(|options, window, cx| {
+        let state = window.use_keyed_state("nekostorage-token", cx, |window, cx| {
+            let token = SettingsStore::get(cx).storage.nekostorage.token.clone();
+            let input = cx.new(|cx| {
+                InputState::new(window, cx)
+                    .masked(true)
+                    .default_value(token)
+            });
+            let subscription = cx.subscribe(&input, |_, input, event: &InputEvent, cx| {
+                if let InputEvent::Change = event {
+                    let token = input.read(cx).value().to_string();
+                    SettingsStore::update(cx, |s| s.storage.nekostorage.token = token);
+                }
+            });
+            (input, subscription)
+        });
+        let input = state.read(cx).0.clone();
+        Input::new(&input)
+            .mask_toggle()
+            .with_size(options.size())
+            .w_64()
+    })
 }
 
 /// A folder with buttons to choose another, go back to the default and reveal it.

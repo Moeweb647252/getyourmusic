@@ -138,6 +138,8 @@ impl Default for OutputSettings {
 pub enum StorageProviderKind {
     #[default]
     Local,
+    /// A nekostorage server's HTTP `api` route.
+    Nekostorage,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -146,6 +148,39 @@ pub struct StorageSettings {
     pub provider: StorageProviderKind,
     /// Destination folder for [`StorageProviderKind::Local`]; `None` uses the default.
     pub local_folder: Option<PathBuf>,
+    pub nekostorage: NekostorageSettings,
+}
+
+/// Where [`StorageProviderKind::Nekostorage`] uploads recordings.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct NekostorageSettings {
+    /// URL of the server's `api` route, e.g. `http://127.0.0.1:8080/api`.
+    pub url: String,
+    /// Bearer token; empty when the route has none.
+    pub token: String,
+    /// Folder below the route's view that recordings are saved to.
+    pub folder: String,
+}
+
+impl Default for NekostorageSettings {
+    fn default() -> Self {
+        Self {
+            url: String::new(),
+            token: String::new(),
+            folder: "/GetYourMusic".into(),
+        }
+    }
+}
+
+impl std::fmt::Debug for NekostorageSettings {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NekostorageSettings")
+            .field("url", &self.url)
+            .field("token", &if self.token.is_empty() { "" } else { "***" })
+            .field("folder", &self.folder)
+            .finish()
+    }
 }
 
 /// Where audio is buffered while a track records, before it is encoded.
@@ -307,6 +342,17 @@ mod tests {
         assert!(!partial.recording.trim_silence);
         assert_eq!(partial.output, OutputSettings::default());
         assert_eq!(partial.cache, CacheSettings::default());
+    }
+
+    #[test]
+    fn debug_output_hides_the_token() {
+        let settings = NekostorageSettings {
+            token: "secret-token".into(),
+            ..Default::default()
+        };
+        let debug = format!("{settings:?}");
+        assert!(!debug.contains("secret-token"), "{debug}");
+        assert!(debug.contains("***"));
     }
 
     #[test]

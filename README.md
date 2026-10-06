@@ -4,6 +4,8 @@ Records what your music player plays into one tagged audio file per track.
 
 GetYourMusic follows the system's Now Playing information. That works with any player that reports to Control Center, such as QQ Music, Spotify, Apple Music or a browser. It records the audio sent to an output device, splits it at track changes, and writes FLAC, MP3 or M4A (AAC/ALAC) files. The files carry title, artist, album and cover art.
 
+Files go to a local folder, or to a nekostorage server through its HTTP `api` route (Settings → Storage). Missing folders are created on the server, and an unreachable server or a rejected token stops recording from starting.
+
 macOS is implemented. Every OS-specific part sits behind a trait, so other platforms can be added without touching the core.
 
 ## Requirements

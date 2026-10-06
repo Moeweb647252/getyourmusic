@@ -1,14 +1,18 @@
-//! Where finished recordings go. Only local storage is implemented today; remote providers
-//! (cloud drives, NAS, …) implement the same trait.
+//! Where finished recordings go: a local folder, or a nekostorage server.
 
 mod local;
+mod nekostorage;
 
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
+use crate::settings::StorageSettings;
+
 pub use local::LocalStorage;
+pub use nekostorage::{NekostorageLocation, NekostorageStorage, RetryPolicy};
 
 /// A relative, sanitized object path using `/` separators, e.g. `Artist/Album/Song.flac`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -107,6 +111,11 @@ pub enum StorageError {
     Unavailable(String),
     #[error("object not found: {0}")]
     NotFound(StorageKey),
+    /// The remote end refused or failed the request.
+    #[error("{0}")]
+    Remote(String),
+    #[error("{0} is not supported by this storage")]
+    Unsupported(&'static str),
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }
@@ -138,10 +147,40 @@ pub trait StorageProvider: Send + Sync {
     /// A local filesystem path for the object, when the provider has one.
     fn local_path(&self, key: &StorageKey) -> Option<PathBuf>;
 
-    /// Free space at the destination in bytes, when known.
-    fn available_space(&self) -> Option<u64> {
-        None
+    /// Space left at the destination in bytes. Never blocks.
+    ///
+    /// `None` only when the destination doesn't report it, or (for a remote destination) when
+    /// [`check`](Self::check) hasn't reached it yet. Every provider must report it when it can,
+    /// because the interface shows it next to the destination.
+    fn available_space(&self) -> Option<u64>;
+
+    /// Verifies that the destination can be reached, and refreshes the space it reports.
+    ///
+    /// May block on the network.
+    fn check(&self) -> Result<(), StorageError> {
+        Ok(())
     }
+}
+
+/// The provider that stored entries with `provider_id`, built from the current settings.
+///
+/// Remote entries keep pointing at the server and folder they were saved to, even after the
+/// settings name another one; the token is only passed to the same server.
+pub fn provider_for_id(
+    provider_id: &str,
+    settings: &StorageSettings,
+    music_folder: &Path,
+) -> Option<Arc<dyn StorageProvider>> {
+    if provider_id == LocalStorage::ID {
+        return Some(Arc::new(LocalStorage::new(music_folder)));
+    }
+    let location = NekostorageLocation::from_id(provider_id)?;
+    let token = NekostorageLocation::parse(&settings.nekostorage)
+        .ok()
+        .filter(|configured| configured.same_server(&location))
+        .map(|_| settings.nekostorage.token.clone())
+        .unwrap_or_default();
+    Some(Arc::new(NekostorageStorage::for_location(location, token)))
 }
 
 #[cfg(test)]
@@ -156,6 +195,51 @@ mod tests {
         let key = StorageKey::from_components(["Artist", "", "Song.flac"]).unwrap();
         assert_eq!(key.as_str(), "Artist/Song.flac");
         assert_eq!(key.file_name(), "Song.flac");
+    }
+
+    #[test]
+    fn entries_keep_their_own_provider() {
+        use crate::settings::{NekostorageSettings, StorageProviderKind};
+        use crate::testing::FakeNekostorage;
+
+        let dir = tempfile::tempdir().unwrap();
+        let music = dir.path().join("Music");
+        let server = FakeNekostorage::start(Some("secret"));
+        let old = NekostorageLocation::parse(&NekostorageSettings {
+            url: server.url().into(),
+            token: String::new(),
+            folder: "/Old".into(),
+        })
+        .unwrap();
+        let mut settings = StorageSettings {
+            provider: StorageProviderKind::Nekostorage,
+            nekostorage: NekostorageSettings {
+                url: server.url().into(),
+                token: "secret".into(),
+                folder: "/New".into(),
+            },
+            ..Default::default()
+        };
+
+        // Same server, another folder: the old folder, with the token.
+        let provider = provider_for_id(&old.id(), &settings, &music).unwrap();
+        assert_eq!(provider.id(), old.id());
+        assert!(provider.display_location().ends_with("/api/Old"));
+        provider.check().unwrap();
+
+        // Another server configured: the old server, without the token.
+        settings.nekostorage.url = "http://other.example/api".into();
+        let provider = provider_for_id(&old.id(), &settings, &music).unwrap();
+        assert!(provider.display_location().ends_with("/api/Old"));
+        assert!(provider.check().unwrap_err().to_string().contains("token"));
+
+        let local = provider_for_id(LocalStorage::ID, &settings, &music).unwrap();
+        let song = StorageKey::from_components(["Song.flac"]).unwrap();
+        assert_eq!(local.local_path(&song), Some(music.join("Song.flac")));
+
+        for id in ["", "dropbox", "nekostorage:", "nekostorage:ftp://h#/"] {
+            assert!(provider_for_id(id, &settings, &music).is_none(), "{id}");
+        }
     }
 
     #[test]

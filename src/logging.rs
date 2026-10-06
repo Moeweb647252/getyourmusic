@@ -7,8 +7,9 @@ use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt as _, util::Subscr
 
 /// Installs the global subscriber. Keep the guard alive for the life of the process.
 pub fn init(dir: &Path) -> Option<WorkerGuard> {
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info,gpui=warn,gpui_component=warn,lofty=error"));
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        EnvFilter::new("info,gpui=warn,gpui_component=warn,lofty=error,ureq=warn")
+    });
     let (file_layer, guard) = match std::fs::create_dir_all(dir) {
         Ok(()) => {
             let appender = tracing_appender::rolling::Builder::new()

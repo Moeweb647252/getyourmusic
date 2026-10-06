@@ -170,6 +170,8 @@ action:
     en: Copy Path
   move_to_trash:
     en: Move to Trash
+  remove_from_library:
+    en: Remove from Library
   open_privacy_settings:
     en: Open Privacy Settings
   choose_source:
@@ -218,6 +220,14 @@ toast:
     en: "Moved “%{title}” to the Trash."
   trash_failed:
     en: "Couldn’t move “%{title}” to the Trash."
+  removed_from_library:
+    en: "Removed “%{title}” from the library. The file is still on the server."
+  remove_failed:
+    en: "Couldn’t remove “%{title}” from the library."
+  stored_on_server:
+    en: "This recording is on the server, at %{location}."
+  storage_unreachable:
+    en: "Recordings can’t be saved: %{error}"
   open_failed:
     en: Couldn’t open the file. It may have been moved or deleted.
   path_copied:
@@ -446,6 +456,8 @@ settings:
       en: Where finished recordings are stored.
     local:
       en: Folder on this Mac
+    nekostorage:
+      en: nekostorage server
   folder:
     title:
       en: Folder
@@ -455,6 +467,31 @@ settings:
       en: Use Default
     prompt:
       en: Choose
+  nekostorage:
+    url_title:
+      en: Server address
+    url_description:
+      en: "The URL of the server’s api route, for example http://127.0.0.1:8080/api."
+    unencrypted:
+      en: This address isn’t encrypted, so the token can be read on the network. Use https:// to reach another computer.
+    token_title:
+      en: Token
+    token_description:
+      en: Leave empty if the route has no token. It’s stored in plain text in the settings file.
+    folder_title:
+      en: Folder on the server
+    folder_description:
+      en: Created when needed. Recordings already in the library keep pointing to the folder they were saved to.
+    connection_title:
+      en: Connection
+    check:
+      en: Check
+    checking:
+      en: Checking…
+    connected:
+      en: Connected
+    invalid:
+      en: "Not set up: %{error}"
   cache_mode:
     title:
       en: Keep recordings in progress

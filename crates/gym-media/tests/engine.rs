@@ -13,9 +13,13 @@ use gym_core::library::{Library, RecordingEntry};
 use gym_core::model::{NowPlaying, PlayerInfo, TrackId, TrackMetadata};
 use gym_core::naming::{DEFAULT_TEMPLATE, NamingFallbacks, NamingTemplate};
 use gym_core::now_playing::{NowPlayingEvent, NowPlayingMonitor};
-use gym_core::settings::{CacheMode, IncompletePolicy, MemoryOverflow, SampleRatePolicy};
-use gym_core::storage::{ConflictPolicy, LocalStorage};
-use gym_core::testing::{FakeCapture, FakeFeeder, FakeNowPlaying};
+use gym_core::settings::{
+    CacheMode, IncompletePolicy, MemoryOverflow, NekostorageSettings, SampleRatePolicy,
+};
+use gym_core::storage::{
+    ConflictPolicy, LocalStorage, NekostorageLocation, NekostorageStorage, StorageProvider,
+};
+use gym_core::testing::{FakeCapture, FakeFeeder, FakeNekostorage, FakeNowPlaying};
 
 const RATE: u32 = 48_000;
 
@@ -69,6 +73,11 @@ struct Recorded {
 
 /// Records a three-track playlist: one joined mid-track, then two full 8 s tracks.
 fn record_playlist(cache: CacheConfig) -> Recorded {
+    record_playlist_to(cache, None)
+}
+
+/// Like [`record_playlist`], into `storage` instead of a local folder.
+fn record_playlist_to(cache: CacheConfig, storage: Option<Arc<dyn StorageProvider>>) -> Recorded {
     let spool = tempfile::tempdir().unwrap();
     let music = tempfile::tempdir().unwrap();
     let data = tempfile::tempdir().unwrap();
@@ -88,7 +97,7 @@ fn record_playlist(cache: CacheConfig) -> Recorded {
         capture: Arc::new(capture),
         now_playing: monitor,
         encoders,
-        storage: Arc::new(LocalStorage::new(music.path())),
+        storage: storage.unwrap_or_else(|| Arc::new(LocalStorage::new(music.path()))),
         library: Arc::clone(&library),
         spool_dir: spool.path().to_path_buf(),
     };
@@ -253,5 +262,50 @@ fn fails_tracks_past_the_memory_limit() {
         "{:?}",
         recorded.failed
     );
+    assert_eq!(std::fs::read_dir(recorded.spool.path()).unwrap().count(), 0);
+}
+
+fn nekostorage(server: &FakeNekostorage, token: &str) -> (Arc<dyn StorageProvider>, String) {
+    let settings = NekostorageSettings {
+        url: server.url().into(),
+        token: token.into(),
+        folder: "/Music".into(),
+    };
+    let id = NekostorageLocation::parse(&settings).unwrap().id();
+    (Arc::new(NekostorageStorage::new(&settings)), id)
+}
+
+#[test]
+fn records_to_a_nekostorage_server() {
+    let server = FakeNekostorage::start(Some("secret"));
+    let (storage, id) = nekostorage(&server, "secret");
+    let recorded = record_playlist_to(CacheConfig::default(), Some(storage));
+    assert!(recorded.failed.is_empty(), "{:?}", recorded.failed);
+    assert_eq!(
+        server.files(),
+        [
+            "/Music/Artist/Album/Artist - First.flac",
+            "/Music/Artist/Album/Artist - Second.flac",
+        ]
+    );
+    assert_eq!(recorded.saved.len(), 2);
+    assert!(recorded.saved.iter().all(|e| e.provider_id == id));
+    assert!(recorded.saved.iter().all(|e| e.size_bytes > 0));
+    assert_eq!(std::fs::read_dir(recorded.spool.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn a_rejected_token_fails_the_tracks() {
+    let server = FakeNekostorage::start(Some("secret"));
+    let (storage, _) = nekostorage(&server, "wrong");
+    let recorded = record_playlist_to(CacheConfig::default(), Some(storage));
+    assert!(recorded.saved.is_empty());
+    assert_eq!(recorded.failed.len(), 2, "{:?}", recorded.failed);
+    assert!(
+        recorded.failed.iter().all(|e| e.contains("token")),
+        "{:?}",
+        recorded.failed
+    );
+    assert!(server.files().is_empty());
     assert_eq!(std::fs::read_dir(recorded.spool.path()).unwrap().count(), 0);
 }

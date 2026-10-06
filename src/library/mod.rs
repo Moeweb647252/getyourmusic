@@ -90,9 +90,21 @@ impl LibraryView {
             return;
         };
         let services = Services::global(cx);
-        let path = services
-            .storage(SettingsStore::get(cx))
-            .local_path(&entry.key);
+        let storage = services.storage_for(&entry.provider_id, SettingsStore::get(cx));
+        if let Some(storage) = &storage
+            && storage.local_path(&entry.key).is_none()
+        {
+            let location = format!("{}/{}", storage.display_location(), entry.key);
+            window.push_notification(
+                gpui_kit::component::notification::Notification::info(tr!(
+                    "toast.stored_on_server",
+                    location = location
+                )),
+                cx,
+            );
+            return;
+        }
+        let path = storage.and_then(|storage| storage.local_path(&entry.key));
         let opened = path
             .filter(|p| p.exists())
             .map(|p| services.platform.open_file(&p));

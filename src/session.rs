@@ -221,9 +221,14 @@ impl RecordingSession {
         self.signal_silent = false;
         cx.notify();
 
-        // Opening an audio device can take a moment; keep the UI responsive.
-        let starting =
-            cx.background_spawn(async move { RecordingEngine::start(config, engine_services) });
+        // Opening an audio device, or reaching a server, can take a moment.
+        let starting = cx.background_spawn(async move {
+            // A server that can't be reached would fail every track, so don't start.
+            engine_services.storage.check().map_err(|err| {
+                tr!("toast.storage_unreachable", error = err.to_string()).to_string()
+            })?;
+            RecordingEngine::start(config, engine_services).map_err(|err| err.to_string())
+        });
         self._engine_task = Some(cx.spawn(
             async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
                 let result = starting.await;
@@ -247,7 +252,7 @@ impl RecordingSession {
 
     fn on_started(
         &mut self,
-        result: Result<EngineHandle, gym_core::engine::EngineError>,
+        result: Result<EngineHandle, String>,
         cx: &mut Context<Self>,
     ) -> Option<async_channel::Receiver<EngineEvent>> {
         match result {
@@ -261,7 +266,7 @@ impl RecordingSession {
             Err(err) => {
                 tracing::error!(%err, "cannot start recording");
                 self.state = SessionState::Idle;
-                cx.emit(SessionEvent::StartFailed(err.to_string().into()));
+                cx.emit(SessionEvent::StartFailed(err.into()));
                 cx.notify();
                 None
             }
@@ -344,8 +349,8 @@ impl RecordingSession {
             }
             EngineEvent::Saved { id, entry } => {
                 let path = Services::global(cx)
-                    .storage(SettingsStore::get(cx))
-                    .local_path(&entry.key);
+                    .storage_for(&entry.provider_id, SettingsStore::get(cx))
+                    .and_then(|storage| storage.local_path(&entry.key));
                 if let Some(row) = self.track_mut(id) {
                     row.state = TrackState::Saved;
                     row.duration = Some(Duration::from_millis(entry.duration_ms));

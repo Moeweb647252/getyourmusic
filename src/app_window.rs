@@ -265,8 +265,8 @@ impl AppWindow {
         let services = Services::global(cx);
         let settings = SettingsStore::get(cx);
         let storage = services.storage(settings);
-        let free = storage
-            .available_space()
+        let free = services
+            .free_space(settings)
             .map(|bytes| tr!("status.free_space", size = display::bytes(bytes)));
         StatusBar::new()
             .left(
