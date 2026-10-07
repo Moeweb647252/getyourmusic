@@ -21,12 +21,17 @@ fn main() {
         "MediaRemoteAdapter.framework was not produced at {}",
         framework.display()
     );
+    // Keep the script next to the framework in the build output. A path into the source
+    // tree breaks when another checkout sharing the target directory reuses this output.
+    let script = out.join("mediaremote-adapter.pl");
+    std::fs::copy(source.join("bin/mediaremote-adapter.pl"), &script)
+        .expect("copy mediaremote-adapter.pl");
     println!(
         "cargo:rustc-env=GYM_MEDIAREMOTE_FRAMEWORK={}",
         framework.display()
     );
     println!(
         "cargo:rustc-env=GYM_MEDIAREMOTE_SCRIPT={}",
-        source.join("bin/mediaremote-adapter.pl").display()
+        script.display()
     );
 }
