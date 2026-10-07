@@ -86,7 +86,7 @@ impl AppWindow {
 
         let page = page.unwrap_or_else(initial_page);
         match page {
-            Page::Library => library.update(cx, |library, cx| library.reload(cx)),
+            Page::Library => library.update(cx, |library, cx| library.reload(window, cx)),
             Page::Settings => settings.update(cx, |settings, cx| settings.refresh(cx)),
             Page::Recorder => {}
         }
@@ -107,7 +107,9 @@ impl AppWindow {
             return;
         }
         match page {
-            Page::Library => self.library.update(cx, |library, cx| library.reload(cx)),
+            Page::Library => self
+                .library
+                .update(cx, |library, cx| library.reload(window, cx)),
             Page::Settings => self
                 .settings
                 .update(cx, |settings, cx| settings.refresh(cx)),

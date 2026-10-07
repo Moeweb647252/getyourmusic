@@ -2,20 +2,39 @@ use std::fs::{self, File};
 use std::io;
 use std::path::{Path, PathBuf};
 
+use chrono::{DateTime, Utc};
+
 use super::{
-    ConflictPolicy, StorageError, StorageKey, StorageProvider, StoreOutcome, StoredObject,
+    ConflictPolicy, StorageError, StorageKey, StorageProvider, StoreOutcome, StoredFile,
+    StoredObject, is_recording_name,
 };
 
 /// Stores recordings in a folder on the local filesystem.
 pub struct LocalStorage {
     root: PathBuf,
+    id: String,
 }
 
 impl LocalStorage {
+    /// Legacy id of library entries saved before ids named their folder; means the current
+    /// music folder.
     pub const ID: &'static str = "local";
+    /// Ids are this prefix followed by the root folder, so entries keep their own folder.
+    pub const ID_PREFIX: &'static str = "local:";
 
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+        let root = root.into();
+        let id = format!("{}{}", Self::ID_PREFIX, root.display());
+        Self { root, id }
+    }
+
+    /// The folder a local storage id names; the legacy [`ID`](Self::ID) means `music_folder`.
+    /// `None` when the id isn't a local one.
+    pub fn folder_for_id(id: &str, music_folder: &Path) -> Option<PathBuf> {
+        if id == Self::ID {
+            return Some(music_folder.to_path_buf());
+        }
+        id.strip_prefix(Self::ID_PREFIX).map(PathBuf::from)
     }
 
     pub fn root(&self) -> &Path {
@@ -68,7 +87,7 @@ fn move_file(source: &Path, dest: &Path) -> io::Result<()> {
 
 impl StorageProvider for LocalStorage {
     fn id(&self) -> &str {
-        Self::ID
+        &self.id
     }
 
     fn display_location(&self) -> String {
@@ -91,7 +110,7 @@ impl StorageProvider for LocalStorage {
         move_file(source, &dest)?;
         let size = fs::metadata(&dest)?.len();
         Ok(StoreOutcome::Stored(StoredObject {
-            provider_id: Self::ID.into(),
+            provider_id: self.id.clone(),
             key,
             size,
         }))
@@ -99,6 +118,15 @@ impl StorageProvider for LocalStorage {
 
     fn exists(&self, key: &StorageKey) -> Result<bool, StorageError> {
         Ok(self.path_for(key).exists())
+    }
+
+    fn list(&self) -> Result<Vec<StoredFile>, StorageError> {
+        if !self.root.is_dir() {
+            return Err(StorageError::Missing(self.display_location()));
+        }
+        let mut files = Vec::new();
+        list_dir(&self.root, &mut Vec::new(), &mut files)?;
+        Ok(files)
     }
 
     fn delete(&self, key: &StorageKey) -> Result<(), StorageError> {
@@ -128,6 +156,54 @@ impl StorageProvider for LocalStorage {
     fn available_space(&self) -> Option<u64> {
         available_space(&self.root)
     }
+}
+
+/// Treats something that disappeared while it was being listed as never having been there.
+fn vanished<T>(result: io::Result<T>) -> io::Result<Option<T>> {
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(err),
+    }
+}
+
+/// Adds the recordings below `dir`, whose path below the root is `prefix`, to `files`.
+fn list_dir(dir: &Path, prefix: &mut Vec<String>, files: &mut Vec<StoredFile>) -> io::Result<()> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let Ok(name) = entry.file_name().into_string() else {
+            tracing::debug!(path = %entry.path().display(), "skipping a name that isn't UTF-8");
+            continue;
+        };
+        if name.starts_with('.') {
+            continue;
+        }
+        // Not followed, so links can't loop or reach outside the folder.
+        let Some(kind) = vanished(entry.file_type())? else {
+            continue;
+        };
+        if kind.is_dir() {
+            prefix.push(name);
+            let listed = vanished(list_dir(&entry.path(), prefix, files));
+            prefix.pop();
+            listed?;
+        } else if kind.is_file() && is_recording_name(&name) {
+            let components = prefix.iter().map(String::as_str).chain([name.as_str()]);
+            let Some(key) = StorageKey::from_components(components) else {
+                tracing::debug!(%name, "skipping a name a storage key can't hold");
+                continue;
+            };
+            let Some(metadata) = vanished(entry.metadata())? else {
+                continue;
+            };
+            files.push(StoredFile {
+                key,
+                size: metadata.len(),
+                modified: metadata.modified().ok().map(DateTime::<Utc>::from),
+            });
+        }
+    }
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -168,6 +244,54 @@ mod tests {
 
     fn key(parts: &[&str]) -> StorageKey {
         StorageKey::from_components(parts.iter().copied()).unwrap()
+    }
+
+    #[test]
+    fn lists_recordings_at_any_depth() {
+        let root = tempfile::tempdir().unwrap();
+        let storage = LocalStorage::new(root.path().join("Music"));
+        assert!(matches!(storage.list(), Err(StorageError::Missing(_))));
+
+        let music = root.path().join("Music");
+        for (path, contents) in [
+            ("A/B/x.flac", &b"abc"[..]),
+            ("A/y.MP3", b"abcd"),
+            ("z.m4a", b"abcde"),
+            ("notes.txt", b"x"),
+            (".hidden.flac", b"x"),
+            ("A/z.flac.partial", b"x"),
+        ] {
+            let path = music.join(path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, contents).unwrap();
+        }
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(root.path(), music.join("loop")).unwrap();
+
+        let mut files = storage.list().unwrap();
+        files.sort_by(|a, b| a.key.as_str().cmp(b.key.as_str()));
+        let listed: Vec<_> = files.iter().map(|f| (f.key.as_str(), f.size)).collect();
+        assert_eq!(listed, [("A/B/x.flac", 3), ("A/y.MP3", 4), ("z.m4a", 5)]);
+        assert!(files.iter().all(|f| f.modified.is_some()));
+    }
+
+    #[test]
+    fn ids_name_the_folder() {
+        let storage = LocalStorage::new("/Users/a/Music/GetYourMusic");
+        assert_eq!(storage.id(), "local:/Users/a/Music/GetYourMusic");
+        let music = Path::new("/Users/a/Music/Current");
+        assert_eq!(
+            LocalStorage::folder_for_id(storage.id(), music),
+            Some(PathBuf::from("/Users/a/Music/GetYourMusic"))
+        );
+        assert_eq!(
+            LocalStorage::folder_for_id(LocalStorage::ID, music),
+            Some(music.to_path_buf())
+        );
+        assert_eq!(
+            LocalStorage::folder_for_id("nekostorage:http://h/api#/", music),
+            None
+        );
     }
 
     #[test]

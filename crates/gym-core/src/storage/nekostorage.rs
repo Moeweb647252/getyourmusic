@@ -2,7 +2,10 @@
 //!
 //! A store creates the parent folder (`mkdir?parents`) and looks for an existing file
 //! (`inspect`) before it uploads, so a refused upload never sends the whole file. The upload
-//! carries `If-None-Match: *` unless overwriting, which settles races. The API has no delete.
+//! carries `If-None-Match: *` unless overwriting, which settles races.
+//!
+//! Listing walks the folder tree with `inspect`. Deleting a file (`delete`) also removes the
+//! folders it leaves empty, up to but not including the recordings folder.
 
 use std::fs::{self, File};
 use std::io;
@@ -11,6 +14,7 @@ use std::sync::Mutex;
 use std::thread;
 use std::time::Duration;
 
+use chrono::{DateTime, Utc};
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -20,7 +24,8 @@ use ureq::{Agent, Body, RequestBuilder};
 use url::Url;
 
 use super::{
-    ConflictPolicy, StorageError, StorageKey, StorageProvider, StoreOutcome, StoredObject,
+    ConflictPolicy, StorageError, StorageKey, StorageProvider, StoreOutcome, StoredFile,
+    StoredObject, is_recording_name,
 };
 use crate::settings::NekostorageSettings;
 
@@ -38,6 +43,8 @@ const MAX_COUNTER: u32 = 999;
 const JSON_LIMIT: u64 = 64 * 1024 * 1024;
 /// Replies the server sends before acting on a request, so it can be repeated safely.
 const RETRY_STATUSES: [u16; 3] = [423, 429, 503];
+/// Folders inspected at once while listing; each one can be a call to a cloud backend.
+const LIST_CONCURRENCY: usize = 4;
 
 /// A normalized `api` route plus the folder recordings go to. Identifies stored recordings.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -195,12 +202,48 @@ struct Metadata {
     size: u64,
     #[serde(default)]
     usage: Option<Usage>,
+    /// A directory's children. Every directory reply has them; one without is malformed,
+    /// and must not pass for an empty folder.
+    #[serde(default)]
+    entries: Option<Vec<Entry>>,
+}
+
+#[derive(Deserialize)]
+struct Entry {
+    name: String,
+    kind: String,
+    #[serde(default)]
+    size: u64,
+    /// Unix seconds.
+    #[serde(default)]
+    modified: Option<i64>,
 }
 
 #[derive(Deserialize)]
 struct Usage {
     #[serde(default)]
     free: Option<u64>,
+}
+
+/// Timeouts for the `inspect` calls of a listing. A server that stops answering mustn't hold
+/// a listing for long: it would keep the Library from being refreshed.
+#[derive(Clone, Copy, Debug)]
+pub struct ListTimeouts {
+    pub connect: Duration,
+    /// Until the reply starts.
+    pub response: Duration,
+    /// For the whole reply body; directory replies list every entry.
+    pub body: Duration,
+}
+
+impl Default for ListTimeouts {
+    fn default() -> Self {
+        Self {
+            connect: Duration::from_secs(10),
+            response: Duration::from_secs(30),
+            body: Duration::from_secs(60),
+        }
+    }
 }
 
 /// Uploads recordings to a folder on a nekostorage server.
@@ -211,6 +254,8 @@ pub struct NekostorageStorage {
     id: String,
     token: String,
     agent: Agent,
+    /// Keeps connections alive across the burst of `inspect` calls a listing makes.
+    list_agent: Agent,
     retry: RetryPolicy,
     free_space: Mutex<Option<u64>>,
 }
@@ -244,7 +289,8 @@ impl NekostorageStorage {
             raw_url,
             id,
             token,
-            agent: agent(),
+            agent: upload_agent(),
+            list_agent: list_agent(ListTimeouts::default()),
             retry: RetryPolicy::default(),
             free_space: Mutex::new(None),
         }
@@ -252,6 +298,11 @@ impl NekostorageStorage {
 
     pub fn with_retry_policy(mut self, retry: RetryPolicy) -> Self {
         self.retry = retry;
+        self
+    }
+
+    pub fn with_list_timeouts(mut self, timeouts: ListTimeouts) -> Self {
+        self.list_agent = list_agent(timeouts);
         self
     }
 
@@ -277,9 +328,21 @@ impl NekostorageStorage {
     /// Sends a request, repeating it while the server can't have acted on it.
     fn send(
         &self,
+        attempt: impl FnMut() -> Result<Response<Body>, ureq::Error>,
+    ) -> Result<Response<Body>, StorageError> {
+        self.send_with(false, attempt)
+    }
+
+    /// Like [`send`](Self::send); an `idempotent` request is also repeated once after a
+    /// failure partway through, such as a pooled connection the server had closed. Only once,
+    /// so a server that stopped answering isn't waited on again and again.
+    fn send_with(
+        &self,
+        idempotent: bool,
         mut attempt: impl FnMut() -> Result<Response<Body>, ureq::Error>,
     ) -> Result<Response<Body>, StorageError> {
         let mut retry = 0;
+        let mut repeated_transfer = false;
         loop {
             let last = retry + 1 >= self.retry.attempts;
             let retry_after = match attempt() {
@@ -290,6 +353,11 @@ impl NekostorageStorage {
                 Ok(response) => return Ok(response),
                 Err(err) if !last && before_request(&err) => {
                     tracing::warn!(%err, "cannot reach nekostorage; retrying");
+                    None
+                }
+                Err(err) if idempotent && !repeated_transfer => {
+                    repeated_transfer = true;
+                    tracing::warn!(%err, "nekostorage request failed; repeating it once");
                     None
                 }
                 Err(err) => return Err(transport_error(err)),
@@ -390,6 +458,80 @@ impl NekostorageStorage {
         Err(not_an_api_route())
     }
 
+    /// One folder of a listing, or `None` when a subfolder vanished meanwhile. A missing root
+    /// means nothing was ever stored there.
+    fn list_folder(
+        &self,
+        location: &NekostorageLocation,
+        path: &[String],
+    ) -> Result<Option<Metadata>, StorageError> {
+        let url = location.url("inspect", path);
+        let response = self.send_with(true, || self.authorize(self.list_agent.get(&url)).call())?;
+        match response.status().as_u16() {
+            200 => {
+                let metadata: Metadata = read_json(response)?;
+                if metadata.kind != "directory" {
+                    return Err(StorageError::Remote(format!(
+                        "{} is a file on the server",
+                        show(path)
+                    )));
+                }
+                if metadata.entries.is_none() {
+                    return Err(StorageError::Remote(format!(
+                        "unexpected reply from the server: folder {} without entries",
+                        show(path)
+                    )));
+                }
+                Ok(Some(metadata))
+            }
+            404 if path.len() == location.folder.len() => {
+                Err(StorageError::Missing(location.display()))
+            }
+            // Deleted while the listing ran, so it holds nothing any more.
+            404 => Ok(None),
+            _ => Err(status_error(&response, path)),
+        }
+    }
+
+    /// Inspects `paths` a few at a time; fails if any of them fails.
+    fn list_folders(
+        &self,
+        location: &NekostorageLocation,
+        paths: &[Vec<String>],
+    ) -> Result<Vec<(Vec<String>, Metadata)>, StorageError> {
+        let chunk = paths.len().div_ceil(LIST_CONCURRENCY).max(1);
+        thread::scope(|scope| {
+            let workers: Vec<_> = paths
+                .chunks(chunk)
+                .map(|chunk| {
+                    scope.spawn(move || {
+                        let mut folders = Vec::new();
+                        for path in chunk {
+                            if let Some(folder) = self.list_folder(location, path)? {
+                                folders.push((path.clone(), folder));
+                            }
+                        }
+                        Ok::<_, StorageError>(folders)
+                    })
+                })
+                .collect();
+            let mut folders = Vec::with_capacity(paths.len());
+            for worker in workers {
+                folders.extend(worker.join().expect("listing thread panicked")?);
+            }
+            Ok(folders)
+        })
+    }
+
+    fn delete_at(
+        &self,
+        location: &NekostorageLocation,
+        path: &[String],
+    ) -> Result<Response<Body>, StorageError> {
+        let url = location.url("delete", path);
+        self.send(|| self.authorize(self.agent.delete(&url)).call())
+    }
+
     fn remember_usage(&self, metadata: &Metadata) {
         *self.free_space.lock().unwrap() = metadata.usage.as_ref().and_then(|usage| usage.free);
     }
@@ -422,6 +564,7 @@ impl StorageProvider for NekostorageStorage {
         let replace = policy == ConflictPolicy::Overwrite;
         let mut candidate = key.clone();
         let mut counter = 1;
+        let mut recreated_folder = false;
         loop {
             let path = location.path_for(&candidate);
             // `None` means the name is taken.
@@ -433,6 +576,12 @@ impl StorageProvider for NekostorageStorage {
                     200 | 201 => Some(read_json::<Metadata>(response)?),
                     // Another writer got there between the check and the upload.
                     412 => None,
+                    // The folder went away meanwhile, e.g. a delete that emptied it.
+                    404 if !recreated_folder => {
+                        recreated_folder = true;
+                        self.create_folder(location, parent)?;
+                        continue;
+                    }
                     _ => return Err(status_error(&response, &path)),
                 }
             };
@@ -476,8 +625,65 @@ impl StorageProvider for NekostorageStorage {
         self.exists_at(location, &location.path_for(key))
     }
 
-    fn delete(&self, _: &StorageKey) -> Result<(), StorageError> {
-        Err(StorageError::Unsupported("deleting files"))
+    fn list(&self) -> Result<Vec<StoredFile>, StorageError> {
+        let location = self.location()?;
+        let root = location.folder.len();
+        let mut files = Vec::new();
+        let mut level = vec![location.folder.clone()];
+        while !level.is_empty() {
+            let mut next = Vec::new();
+            for (path, folder) in self.list_folders(location, &level)? {
+                if path.len() == root {
+                    self.remember_usage(&folder);
+                }
+                for entry in folder.entries.unwrap_or_default() {
+                    if entry.name.starts_with('.') {
+                        continue;
+                    }
+                    let mut child = path.clone();
+                    child.push(entry.name);
+                    match entry.kind.as_str() {
+                        "directory" => next.push(child),
+                        "file" if is_recording_name(&child[child.len() - 1]) => {
+                            let Some(key) = StorageKey::from_components(&child[root..]) else {
+                                tracing::debug!(path = %show(&child), "skipping a name a storage key can't hold");
+                                continue;
+                            };
+                            files.push(StoredFile {
+                                key,
+                                size: entry.size,
+                                modified: entry.modified.and_then(|seconds| {
+                                    DateTime::<Utc>::from_timestamp(seconds, 0)
+                                }),
+                            });
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            level = next;
+        }
+        Ok(files)
+    }
+
+    fn delete(&self, key: &StorageKey) -> Result<(), StorageError> {
+        let location = self.location()?;
+        let path = location.path_for(key);
+        let response = self.delete_at(location, &path)?;
+        match response.status().as_u16() {
+            204 => {}
+            404 => return Err(StorageError::NotFound(key.clone())),
+            _ => return Err(status_error(&response, &path)),
+        }
+        // Remove folders the deletion left empty, but never the recordings folder itself.
+        // Without `recursive` the server refuses folders that still hold something (409).
+        for depth in (location.folder.len() + 1..path.len()).rev() {
+            match self.delete_at(location, &path[..depth]) {
+                Ok(response) if response.status() == 204 => {}
+                _ => break,
+            }
+        }
+        Ok(())
     }
 
     fn local_path(&self, _: &StorageKey) -> Option<std::path::PathBuf> {
@@ -498,24 +704,40 @@ impl StorageProvider for NekostorageStorage {
     }
 }
 
-fn agent() -> Agent {
-    Agent::config_builder()
-        .http_status_as_error(false)
-        // Never send the token anywhere else; none of the calls used here redirect.
-        .max_redirects(0)
-        // Uploads are minutes apart, so a pooled connection would likely be stale by then.
+/// Every request opens a new connection: uploads are minutes apart, so a pooled connection
+/// would likely be stale by then, and an upload can't safely be repeated.
+fn upload_agent() -> Agent {
+    agent_config()
         .max_idle_connections(0)
         .timeout_connect(Some(Duration::from_secs(10)))
         // Large files are streamed on to slow cloud backends before the server replies.
         .timeout_recv_response(Some(Duration::from_secs(300)))
+        .build()
+        .new_agent()
+}
+
+/// Keeps connections alive across the burst of `inspect` calls a listing makes.
+fn list_agent(timeouts: ListTimeouts) -> Agent {
+    agent_config()
+        .max_idle_age(Duration::from_secs(5))
+        .timeout_connect(Some(timeouts.connect))
+        .timeout_recv_response(Some(timeouts.response))
+        .timeout_recv_body(Some(timeouts.body))
+        .build()
+        .new_agent()
+}
+
+fn agent_config() -> ureq::config::ConfigBuilder<ureq::typestate::AgentScope> {
+    Agent::config_builder()
+        .http_status_as_error(false)
+        // Never send the token anywhere else; none of the calls used here redirect.
+        .max_redirects(0)
         .tls_config(
             TlsConfig::builder()
                 .root_certs(RootCerts::PlatformVerifier)
                 .build(),
         )
         .user_agent(concat!("GetYourMusic/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .new_agent()
 }
 
 /// Whether the request failed before anything reached the server.
@@ -923,9 +1145,174 @@ mod tests {
                 .to_string()
                 .contains("is a file")
         );
+    }
+
+    #[test]
+    fn lists_recordings_at_any_depth() {
+        let server = FakeNekostorage::start(Some("secret"));
+        for dir in ["/Music/A/B", "/Music/猫", "/Other"] {
+            server.add_dir(dir);
+        }
+        for (path, size) in [
+            ("/Music/A/B/x.flac", 3),
+            ("/Music/A/y.MP3", 4),
+            ("/Music/z.m4a", 5),
+            ("/Music/猫/a b+c.flac", 6),
+            ("/Music/notes.txt", 1),
+            ("/Music/.hidden.flac", 1),
+            ("/Other/w.flac", 1),
+        ] {
+            server.add_file(path, &vec![0; size]);
+        }
+        let storage = storage(&server, "secret");
+        let mut files = storage.list().unwrap();
+        files.sort_by(|a, b| a.key.as_str().cmp(b.key.as_str()));
+        let listed: Vec<_> = files.iter().map(|f| (f.key.as_str(), f.size)).collect();
+        assert_eq!(
+            listed,
+            [
+                ("A/B/x.flac", 3),
+                ("A/y.MP3", 4),
+                ("z.m4a", 5),
+                ("猫/a b+c.flac", 6)
+            ]
+        );
+        assert!(files.iter().all(|f| f.modified.is_some()));
+        assert_eq!(storage.available_space(), Some(6_436_315_136));
+    }
+
+    #[test]
+    fn a_listing_fails_as_a_whole() {
+        let server = FakeNekostorage::start(None);
+        let storage = storage(&server, "");
+        assert!(matches!(storage.list(), Err(StorageError::Missing(_))));
+
+        server.add_dir("/Music/A");
+        server.add_dir("/Music/B");
+        server.add_file("/Music/B/b.flac", b"x");
+        assert_eq!(storage.list().unwrap().len(), 1);
+        server.break_inspect("/Music/A");
+        let err = storage.list().unwrap_err();
+        assert!(err.to_string().contains("502"), "{err}");
+    }
+
+    #[test]
+    fn a_folder_reply_without_entries_fails_the_listing() {
+        let server = FakeNekostorage::start(None);
+        server.add_dir("/Music/A");
+        server.add_file("/Music/A/a.flac", b"x");
+        server.omit_entries("/Music/A");
+        let err = storage(&server, "").list().unwrap_err();
+        assert!(err.to_string().contains("without entries"), "{err}");
+    }
+
+    #[test]
+    fn folders_that_vanish_during_a_listing_are_skipped() {
+        let server = FakeNekostorage::start(None);
+        for dir in ["/Music/Gone", "/Music/Kept"] {
+            server.add_dir(dir);
+        }
+        server.add_file("/Music/Gone/g.flac", b"x");
+        server.add_file("/Music/Kept/k.flac", b"x");
+        server.hide_from_inspect("/Music/Gone");
+        let listed: Vec<_> = storage(&server, "")
+            .list()
+            .unwrap()
+            .into_iter()
+            .map(|f| f.key.to_string())
+            .collect();
+        assert_eq!(listed, ["Kept/k.flac"]);
+
+        server.hide_from_inspect("/Music");
         assert!(matches!(
-            storage.delete(&key("a.flac")),
-            Err(StorageError::Unsupported(_))
+            storage(&server, "").list(),
+            Err(StorageError::Missing(_))
+        ));
+    }
+
+    #[test]
+    fn a_stalled_server_ends_the_listing_quickly() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            // Accept and never answer, keeping the connections open.
+            let mut open = Vec::new();
+            for stream in listener.incoming() {
+                open.extend(stream.ok());
+            }
+        });
+        let timeout = Duration::from_millis(200);
+        let storage =
+            NekostorageStorage::new(&settings(&format!("http://127.0.0.1:{port}/api"), "", "/"))
+                .with_retry_policy(INSTANT)
+                .with_list_timeouts(ListTimeouts {
+                    connect: timeout,
+                    response: timeout,
+                    body: timeout,
+                });
+        let started = std::time::Instant::now();
+        assert!(storage.list().is_err());
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "took {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn an_upload_whose_folder_vanished_recreates_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = FakeNekostorage::start(None);
+        let storage = storage(&server, "");
+        server.queue_upload_replies(&[404]);
+        stored(
+            storage
+                .store(
+                    &key("A/B/x.flac"),
+                    &source(dir.path(), b"x"),
+                    ConflictPolicy::KeepBoth,
+                )
+                .unwrap(),
+        );
+        assert_eq!(server.uploads(), 2);
+        assert_eq!(server.files(), ["/Music/A/B/x.flac"]);
+    }
+
+    #[test]
+    fn deletes_and_removes_emptied_folders() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = FakeNekostorage::start(None);
+        let storage = storage(&server, "");
+        for name in ["A/B/x.flac", "A/y.flac"] {
+            stored(
+                storage
+                    .store(
+                        &key(name),
+                        &source(dir.path(), b"x"),
+                        ConflictPolicy::KeepBoth,
+                    )
+                    .unwrap(),
+            );
+        }
+
+        storage.delete(&key("A/B/x.flac")).unwrap();
+        assert_eq!(server.files(), ["/Music/A/y.flac"]);
+        assert_eq!(
+            server.dirs(),
+            ["/", "/Music", "/Music/A"],
+            "the emptied folder goes"
+        );
+
+        storage.delete(&key("A/y.flac")).unwrap();
+        assert!(server.files().is_empty());
+        assert_eq!(
+            server.dirs(),
+            ["/", "/Music"],
+            "the recordings folder itself stays"
+        );
+        assert!(matches!(
+            storage.delete(&key("A/y.flac")),
+            Err(StorageError::NotFound(_))
         ));
     }
 
@@ -975,16 +1362,19 @@ mod tests {
 
     /// Run with `GYM_NEKOSTORAGE_URL=… GYM_NEKOSTORAGE_TOKEN=… cargo test -p gym-core -- --ignored`.
     ///
-    /// Leaves a `/gym-test-…` folder on the server, since the API can't delete.
+    /// Works in a `gym-test-…` folder below `GYM_NEKOSTORAGE_BASE` (a mount such as `/198`)
+    /// and removes it again.
     #[test]
     #[ignore = "needs a nekostorage server in GYM_NEKOSTORAGE_URL"]
     fn live_server() {
         let url = std::env::var("GYM_NEKOSTORAGE_URL").expect("GYM_NEKOSTORAGE_URL");
         let token = std::env::var("GYM_NEKOSTORAGE_TOKEN").unwrap_or_default();
-        let folder = format!(
-            "/gym-test-{}",
+        let base = std::env::var("GYM_NEKOSTORAGE_BASE").unwrap_or_default();
+        let name = format!(
+            "gym-test-{}",
             &uuid::Uuid::new_v4().simple().to_string()[..8]
         );
+        let folder = format!("{}/{name}", base.trim_end_matches('/'));
         let storage = NekostorageStorage::new(&settings(&url, &token, &folder));
         storage.check().unwrap();
 
@@ -1018,11 +1408,42 @@ mod tests {
         assert!(storage.exists(&song).unwrap());
         assert!(!storage.exists(&key("Artist/Album/missing.flac")).unwrap());
         storage.check().unwrap();
+
+        let mut listed: Vec<_> = storage
+            .list()
+            .unwrap()
+            .into_iter()
+            .map(|f| (f.key.to_string(), f.size))
+            .collect();
+        listed.sort();
+        assert_eq!(
+            listed,
+            [
+                ("Artist/Album/Song 猫 (2).flac".to_owned(), 6),
+                ("Artist/Album/Song 猫.flac".to_owned(), 5),
+            ]
+        );
         println!(
-            "stored under {} on {}; free space: {:?}",
-            folder,
+            "listed {} files under {folder} on {}; free space: {:?}",
+            listed.len(),
             storage.display_location(),
             storage.available_space()
         );
+
+        storage.delete(&song).unwrap();
+        storage.delete(&second.key).unwrap();
+        assert!(matches!(
+            storage.delete(&song),
+            Err(StorageError::NotFound(_))
+        ));
+        assert!(
+            storage.list().unwrap().is_empty(),
+            "emptied folders are gone"
+        );
+
+        // Remove the test folder itself through its parent.
+        let parent = NekostorageStorage::new(&settings(&url, &token, &base));
+        parent.delete(&key(&name)).unwrap();
+        assert!(matches!(storage.list(), Err(StorageError::Missing(_))));
     }
 }

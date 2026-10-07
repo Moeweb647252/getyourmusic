@@ -18,6 +18,13 @@ pub enum OutputFormat {
 impl OutputFormat {
     pub const ALL: [OutputFormat; 3] = [OutputFormat::Flac, OutputFormat::Mp3, OutputFormat::M4a];
 
+    /// The format a file name's extension stands for, ignoring case.
+    pub fn from_extension(extension: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|format| format.extension().eq_ignore_ascii_case(extension))
+    }
+
     pub fn extension(self) -> &'static str {
         match self {
             OutputFormat::Flac => "flac",

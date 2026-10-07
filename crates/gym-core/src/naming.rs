@@ -34,6 +34,20 @@ impl Default for NamingFallbacks {
     }
 }
 
+/// Track details recovered from a storage key by [`NamingTemplate::match_key`].
+///
+/// Values are as they appear in the path, so characters the file system doesn't allow have
+/// been replaced (`AC/DC` reads back as `AC_DC`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PathFields {
+    pub title: Option<String>,
+    pub artist: Option<String>,
+    pub album: Option<String>,
+    pub album_artist: Option<String>,
+    pub genre: Option<String>,
+    pub track_number: Option<u32>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum TemplateError {
     #[error("the template is empty")]
@@ -145,6 +159,80 @@ impl NamingTemplate {
     }
 }
 
+impl NamingTemplate {
+    /// Reverses [`render`](Self::render): the values a key rendered with this template holds,
+    /// or `None` when the key has another shape. Fallback words count as no value.
+    pub fn match_key(&self, key: &StorageKey, fallbacks: &NamingFallbacks) -> Option<PathFields> {
+        let parts: Vec<&str> = key.components().collect();
+        if parts.len() != self.components.len() {
+            return None;
+        }
+        let mut fields = PathFields::default();
+        for (index, (segments, part)) in self.components.iter().zip(&parts).enumerate() {
+            let text = if index == parts.len() - 1 {
+                part.rsplit_once('.').map_or(*part, |(stem, _)| stem)
+            } else {
+                part
+            };
+            for (name, value) in match_segments(segments, text)? {
+                let value = value.trim();
+                let fallback = [
+                    &fallbacks.unknown_artist,
+                    &fallbacks.unknown_album,
+                    &fallbacks.untitled,
+                ]
+                .contains(&&value.to_owned());
+                if value.is_empty() || value == "_" || fallback {
+                    continue;
+                }
+                let slot = match name {
+                    "title" => &mut fields.title,
+                    "artist" => &mut fields.artist,
+                    "album" => &mut fields.album,
+                    "album_artist" => &mut fields.album_artist,
+                    "genre" => &mut fields.genre,
+                    "track" => {
+                        fields.track_number = fields.track_number.or(value.parse().ok());
+                        continue;
+                    }
+                    _ => continue,
+                };
+                // A placeholder used twice keeps its first value.
+                slot.get_or_insert_with(|| value.to_owned());
+            }
+        }
+        Some(fields)
+    }
+}
+
+/// Splits `text` along the literals of one component; placeholders take the text between.
+fn match_segments<'a>(segments: &'a [Segment], text: &'a str) -> Option<Vec<(&'a str, &'a str)>> {
+    let mut values = Vec::new();
+    let mut rest = text;
+    let mut pending: Option<&str> = None;
+    for segment in segments {
+        match segment {
+            Segment::Literal(literal) => match pending.take() {
+                Some(name) => {
+                    let at = rest.find(literal.as_str())?;
+                    values.push((name, &rest[..at]));
+                    rest = &rest[at + literal.len()..];
+                }
+                None => rest = rest.strip_prefix(literal.as_str())?,
+            },
+            // Two placeholders in a row can't be told apart.
+            Segment::Placeholder(_) if pending.is_some() => return None,
+            Segment::Placeholder(name) => pending = Some(name),
+        }
+    }
+    match pending {
+        Some(name) => values.push((name, rest)),
+        None if !rest.is_empty() => return None,
+        None => {}
+    }
+    Some(values)
+}
+
 fn parse_component(part: &str) -> Result<Vec<Segment>, TemplateError> {
     let mut segments = Vec::new();
     let mut rest = part;
@@ -232,6 +320,28 @@ mod tests {
             key.as_str(),
             "AC_DC/Unknown Album/AC_DC - Song_ Part 1_2.flac"
         );
+    }
+
+    #[test]
+    fn keys_read_back_into_fields() {
+        let fallbacks = NamingFallbacks::default();
+        let template = NamingTemplate::parse(DEFAULT_TEMPLATE).unwrap();
+        let key = template.render(&track(), &player(), "flac", &fallbacks);
+        let fields = template.match_key(&key, &fallbacks).unwrap();
+        assert_eq!(fields.title.as_deref(), Some("Song_ Part 1_2"));
+        assert_eq!(fields.artist.as_deref(), Some("AC_DC"));
+        assert_eq!(fields.album, None, "the fallback word means no album");
+
+        let numbered = NamingTemplate::parse("{track} {title}").unwrap();
+        let key = numbered.render(&track(), &player(), "mp3", &fallbacks);
+        let fields = numbered.match_key(&key, &fallbacks).unwrap();
+        assert_eq!(fields.track_number, Some(3));
+        assert_eq!(fields.title.as_deref(), Some("Song_ Part 1_2"));
+
+        let other = StorageKey::from_components(["Loose File.flac"]).unwrap();
+        assert_eq!(template.match_key(&other, &fallbacks), None);
+        let no_separator = StorageKey::from_components(["A", "B", "Title.flac"]).unwrap();
+        assert_eq!(template.match_key(&no_separator, &fallbacks), None);
     }
 
     #[test]

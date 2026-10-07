@@ -29,6 +29,22 @@ pub struct Services {
     storage: Mutex<Option<(StorageSettings, Arc<dyn StorageProvider>)>>,
     /// The last [`StorageProvider::check`] and the settings it was made for.
     storage_status: Mutex<Option<(StorageSettings, StorageStatus)>>,
+    /// [`known_storages`](Self::known_storages), and what they were built from.
+    known: Mutex<Option<KnownStorages>>,
+}
+
+/// A storage the Library shows, and other ids its recordings are filed under.
+#[derive(Clone)]
+pub struct KnownStorage {
+    pub provider: Arc<dyn StorageProvider>,
+    /// Library ids that resolve to this storage under a different id, e.g. an older form.
+    pub aliases: Vec<String>,
+}
+
+struct KnownStorages {
+    settings: StorageSettings,
+    library_ids: Vec<String>,
+    storages: Vec<KnownStorage>,
 }
 
 /// Whether the selected storage could be reached when it was last checked.
@@ -70,6 +86,12 @@ impl Services {
             });
 
         let library = Arc::new(Library::open(dirs.library_file()));
+        // Entries from before local ids named their folder were saved to the music folder.
+        let music_folder = dirs.music_folder(&SettingsStore::get(cx).storage);
+        let local_id = LocalStorage::new(music_folder).id().to_owned();
+        if let Err(err) = library.rename_provider(LocalStorage::ID, &local_id) {
+            tracing::warn!(%err, "cannot migrate library entries to folder ids");
+        }
         cx.set_global(Self {
             platform,
             dirs,
@@ -78,6 +100,7 @@ impl Services {
             now_playing,
             storage: Mutex::new(None),
             storage_status: Mutex::new(None),
+            known: Mutex::new(None),
         });
         Self::check_storage(cx);
         Self::recheck_storage_on_change(cx);
@@ -89,11 +112,7 @@ impl Services {
 
     /// The folder recordings are saved to with the current settings.
     pub fn music_folder(&self, settings: &AppSettings) -> PathBuf {
-        settings
-            .storage
-            .local_folder
-            .clone()
-            .unwrap_or_else(|| self.dirs.default_music_folder.clone())
+        self.dirs.music_folder(&settings.storage)
     }
 
     /// The folder for audio of tracks being recorded with the current settings.
@@ -138,6 +157,60 @@ impl Services {
             &settings.storage,
             &self.music_folder(settings),
         )
+    }
+
+    /// Every storage the Library shows: this Mac's music folder, the configured server, and
+    /// any other storage that holds recordings in the Library. Built again only when the
+    /// storage settings or the Library's storages change.
+    pub fn known_storages(&self, settings: &AppSettings) -> Vec<KnownStorage> {
+        let library_ids = self.library.provider_ids();
+        let mut known = self.known.lock().unwrap();
+        if let Some(cached) = known.as_ref()
+            && cached.settings == settings.storage
+            && cached.library_ids == library_ids
+        {
+            return cached.storages.clone();
+        }
+        let music_folder = self.music_folder(settings);
+        let mut storages = vec![KnownStorage {
+            provider: Arc::new(LocalStorage::new(&music_folder)),
+            aliases: Vec::new(),
+        }];
+        if NekostorageStorage::validate(&settings.storage.nekostorage).is_ok() {
+            storages.push(KnownStorage {
+                provider: Arc::new(NekostorageStorage::new(&settings.storage.nekostorage)),
+                aliases: Vec::new(),
+            });
+        }
+        for id in &library_ids {
+            let Some(provider) =
+                gym_core::storage::provider_for_id(id, &settings.storage, &music_folder)
+            else {
+                continue;
+            };
+            // Deduplicated by the id it resolves to, so one folder is never listed twice.
+            match storages
+                .iter_mut()
+                .find(|known| known.provider.id() == provider.id())
+            {
+                Some(known) if known.provider.id() != id => known.aliases.push(id.clone()),
+                Some(_) => {}
+                None => {
+                    let aliases = if provider.id() == id {
+                        Vec::new()
+                    } else {
+                        vec![id.clone()]
+                    };
+                    storages.push(KnownStorage { provider, aliases });
+                }
+            }
+        }
+        *known = Some(KnownStorages {
+            settings: settings.storage.clone(),
+            library_ids,
+            storages: storages.clone(),
+        });
+        storages
     }
 
     /// Space left at the selected destination, when it reports it.

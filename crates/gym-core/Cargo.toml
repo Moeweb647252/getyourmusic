@@ -13,6 +13,7 @@ chrono.workspace = true
 crossbeam-channel.workspace = true
 directories.workspace = true
 hound.workspace = true
+icu_normalizer.workspace = true
 lofty.workspace = true
 percent-encoding.workspace = true
 rtrb.workspace = true

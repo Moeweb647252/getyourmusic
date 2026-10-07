@@ -172,6 +172,12 @@ action:
     en: Move to Trash
   remove_from_library:
     en: Remove from Library
+  delete_from_server:
+    en: Delete from Server…
+  delete:
+    en: Delete
+  refresh:
+    en: Refresh
   open_privacy_settings:
     en: Open Privacy Settings
   choose_source:
@@ -221,9 +227,15 @@ toast:
   trash_failed:
     en: "Couldn’t move “%{title}” to the Trash."
   removed_from_library:
-    en: "Removed “%{title}” from the library. The file is still on the server."
+    en: "Removed “%{title}” from the library."
+  deleted:
+    en: "Deleted “%{title}” from the server."
+  delete_failed:
+    en: "Couldn’t delete “%{title}”"
   remove_failed:
     en: "Couldn’t remove “%{title}” from the library."
+  storage_offline:
+    en: "%{name} is offline: %{reason}"
   stored_on_server:
     en: "This recording is on the server, at %{location}."
   storage_unreachable:
@@ -245,9 +257,23 @@ library:
   empty_title:
     en: No recordings yet
   empty_hint:
-    en: Tracks you record appear here.
+    en: Tracks you record appear here, along with the recordings already in your storage.
   no_matches:
     en: No recordings match your search.
+  all_storages:
+    en: All storages
+  scanning:
+    en: Scanning…
+  storage_offline:
+    en: "%{name} (offline)"
+  storage_offline_reason:
+    en: "%{name} (offline: %{reason})"
+  unknown_storage:
+    en: This storage can’t be reached any more.
+  delete_title:
+    en: "Delete “%{title}” from the server?"
+  delete_description:
+    en: This can’t be undone, unless the server keeps deleted files. The 139 driver moves them to the drive’s recycle bin.
   column:
     title:
       en: Title
@@ -261,6 +287,8 @@ library:
       en: Format
     size:
       en: Size
+    storage:
+      en: Storage
     recorded:
       en: Recorded
 

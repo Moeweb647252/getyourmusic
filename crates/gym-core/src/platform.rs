@@ -95,6 +95,14 @@ impl AppDirs {
         })
     }
 
+    /// The folder local recordings go to with `storage`'s settings.
+    pub fn music_folder(&self, storage: &crate::settings::StorageSettings) -> PathBuf {
+        storage
+            .local_folder
+            .clone()
+            .unwrap_or_else(|| self.default_music_folder.clone())
+    }
+
     pub fn settings_file(&self) -> PathBuf {
         self.config.join("settings.json")
     }

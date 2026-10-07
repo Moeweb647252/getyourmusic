@@ -139,7 +139,8 @@ impl AudioCaptureBackend for FakeCapture {
 
 /// A nekostorage `api` route at `<url>` on a local port, keeping files in memory.
 ///
-/// Implements `upload`, `mkdir` and `inspect` as documented, including the bearer token.
+/// Implements `upload`, `mkdir`, `inspect` and `delete` as documented, including the bearer
+/// token.
 pub struct FakeNekostorage {
     url: String,
     state: Arc<Mutex<NekoState>>,
@@ -157,6 +158,12 @@ struct NekoState {
     uploads: usize,
     free: Option<u64>,
     redirect: bool,
+    /// Folders whose `inspect` fails with 502.
+    broken: std::collections::BTreeSet<String>,
+    /// Paths whose `inspect` says 404 although their parent lists them.
+    hidden: std::collections::BTreeSet<String>,
+    /// Folders whose `inspect` reply leaves out `entries`.
+    without_entries: std::collections::BTreeSet<String>,
 }
 
 type NekoReply = tiny_http::Response<std::io::Cursor<Vec<u8>>>;
@@ -174,6 +181,9 @@ impl FakeNekostorage {
             uploads: 0,
             free: Some(6_436_315_136),
             redirect: false,
+            broken: Default::default(),
+            hidden: Default::default(),
+            without_entries: Default::default(),
         }));
         let thread = {
             let (server, state) = (Arc::clone(&server), Arc::clone(&state));
@@ -232,6 +242,41 @@ impl FakeNekostorage {
     /// Free space reported in `usage`; `None` reports `usage: null`.
     pub fn set_free(&self, free: Option<u64>) {
         self.state.lock().unwrap().free = free;
+    }
+
+    /// Adds an empty folder, with its parents.
+    pub fn add_dir(&self, path: &str) {
+        let mut state = self.state.lock().unwrap();
+        let mut current = String::new();
+        for segment in path.split('/').filter(|s| !s.is_empty()) {
+            current = format!("{current}/{segment}");
+            state.dirs.insert(current.clone());
+        }
+    }
+
+    /// Paths of all folders, the view root included.
+    pub fn dirs(&self) -> Vec<String> {
+        self.state.lock().unwrap().dirs.iter().cloned().collect()
+    }
+
+    /// `inspect` of the folder at `path` fails with 502 from now on.
+    pub fn break_inspect(&self, path: &str) {
+        self.state.lock().unwrap().broken.insert(path.into());
+    }
+
+    /// `inspect` of `path` says 404 from now on, as if it were deleted after its parent was
+    /// listed.
+    pub fn hide_from_inspect(&self, path: &str) {
+        self.state.lock().unwrap().hidden.insert(path.into());
+    }
+
+    /// `inspect` of the folder at `path` leaves out `entries` from now on.
+    pub fn omit_entries(&self, path: &str) {
+        self.state
+            .lock()
+            .unwrap()
+            .without_entries
+            .insert(path.into());
     }
 
     /// Answers every request with a redirect to another host.
@@ -371,7 +416,36 @@ fn neko_reply(state: &mut NekoState, request: &mut tiny_http::Request) -> NekoRe
                 neko_metadata(&path, "directory", 0),
             )
         }
+        ("delete", Method::Delete) => {
+            if path == "/" {
+                return neko_status(403);
+            }
+            if state.files.remove(&path).is_some() {
+                return neko_status(204);
+            }
+            if !state.dirs.contains(&path) {
+                return neko_status(404);
+            }
+            let recursive = query
+                .split('&')
+                .any(|q| matches!(q, "recursive" | "recursive=true" | "recursive=1"));
+            let inside = format!("{path}/");
+            let has_children = state.dirs.iter().any(|p| p.starts_with(&inside))
+                || state.files.keys().any(|p| p.starts_with(&inside));
+            if has_children && !recursive {
+                return neko_status(409);
+            }
+            state.dirs.retain(|p| *p != path && !p.starts_with(&inside));
+            state.files.retain(|p, _| !p.starts_with(&inside));
+            neko_status(204)
+        }
         ("inspect", Method::Get | Method::Head) => {
+            if state.broken.contains(&path) {
+                return neko_status(502);
+            }
+            if state.hidden.contains(&path) {
+                return neko_status(404);
+            }
             if let Some(bytes) = state.files.get(&path) {
                 return neko_json(200, neko_metadata(&path, "file", bytes.len()));
             }
@@ -387,14 +461,16 @@ fn neko_reply(state: &mut NekoState, request: &mut tiny_http::Request) -> NekoRe
                 .map(|(p, kind, size)| neko_metadata(p, kind, size))
                 .collect::<Vec<_>>();
             let mut reply = neko_metadata(&path, "directory", 0);
-            reply["entries"] = children.into();
+            if !state.without_entries.contains(&path) {
+                reply["entries"] = children.into();
+            }
             reply["usage"] = match state.free {
                 Some(free) => serde_json::json!({ "total": null, "used": null, "free": free }),
                 None => serde_json::Value::Null,
             };
             neko_json(200, reply)
         }
-        ("upload" | "mkdir" | "inspect", _) => neko_status(405),
+        ("upload" | "mkdir" | "inspect" | "delete", _) => neko_status(405),
         _ => neko_status(404),
     }
 }

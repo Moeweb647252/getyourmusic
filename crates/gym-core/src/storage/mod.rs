@@ -7,12 +7,14 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::encode::OutputFormat;
 use crate::settings::StorageSettings;
 
 pub use local::LocalStorage;
-pub use nekostorage::{NekostorageLocation, NekostorageStorage, RetryPolicy};
+pub use nekostorage::{ListTimeouts, NekostorageLocation, NekostorageStorage, RetryPolicy};
 
 /// A relative, sanitized object path using `/` separators, e.g. `Artist/Album/Song.flac`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -47,6 +49,15 @@ impl StorageKey {
 
     pub fn components(&self) -> impl Iterator<Item = &str> {
         self.0.split('/')
+    }
+
+    /// The key as a storage that ignores letter case and Unicode normalization sees it (NFC,
+    /// lowercased), to recognize one file under another spelling. On case-insensitive APFS,
+    /// `Artist/Song.flac` saved into an existing `artist/` folder lists as `artist/Song.flac`.
+    pub fn match_form(&self) -> String {
+        icu_normalizer::ComposingNormalizerBorrowed::new_nfc()
+            .normalize(&self.0)
+            .to_lowercase()
     }
 
     /// The last component, i.e. the file name.
@@ -90,6 +101,23 @@ pub enum ConflictPolicy {
     KeepBoth,
 }
 
+/// A recording found at a destination by [`StorageProvider::list`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredFile {
+    pub key: StorageKey,
+    pub size: u64,
+    #[serde(default)]
+    pub modified: Option<DateTime<Utc>>,
+}
+
+/// Whether a file name is one of the recordings the app writes, judged by its extension.
+pub fn is_recording_name(name: &str) -> bool {
+    !name.starts_with('.')
+        && name.rsplit_once('.').is_some_and(|(stem, ext)| {
+            !stem.is_empty() && OutputFormat::from_extension(ext).is_some()
+        })
+}
+
 /// A stored recording.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoredObject {
@@ -111,6 +139,9 @@ pub enum StorageError {
     Unavailable(String),
     #[error("object not found: {0}")]
     NotFound(StorageKey),
+    /// The destination's root folder doesn't exist (yet, or any more).
+    #[error("{0} doesn't exist")]
+    Missing(String),
     /// The remote end refused or failed the request.
     #[error("{0}")]
     Remote(String),
@@ -124,7 +155,8 @@ pub enum StorageError {
 ///
 /// Implementations are called from worker threads and may block.
 pub trait StorageProvider: Send + Sync {
-    /// Stable identifier persisted with library entries (e.g. `"local"`).
+    /// Stable identifier persisted with library entries; it names the destination, e.g.
+    /// `local:/Users/me/Music/GetYourMusic` or `nekostorage:http://nas:8080/api#/Music`.
     fn id(&self) -> &str;
 
     /// Human readable location, e.g. `~/Music/GetYourMusic`.
@@ -141,6 +173,12 @@ pub trait StorageProvider: Send + Sync {
     ) -> Result<StoreOutcome, StorageError>;
 
     fn exists(&self, key: &StorageKey) -> Result<bool, StorageError>;
+
+    /// Every recording below the destination's root, at any depth.
+    ///
+    /// Fails as a whole when any part can't be read, and with [`StorageError::Missing`] when
+    /// the root doesn't exist, so a listing that succeeds is complete. May block.
+    fn list(&self) -> Result<Vec<StoredFile>, StorageError>;
 
     fn delete(&self, key: &StorageKey) -> Result<(), StorageError>;
 
@@ -171,8 +209,8 @@ pub fn provider_for_id(
     settings: &StorageSettings,
     music_folder: &Path,
 ) -> Option<Arc<dyn StorageProvider>> {
-    if provider_id == LocalStorage::ID {
-        return Some(Arc::new(LocalStorage::new(music_folder)));
+    if let Some(folder) = LocalStorage::folder_for_id(provider_id, music_folder) {
+        return Some(Arc::new(LocalStorage::new(folder)));
     }
     let location = NekostorageLocation::from_id(provider_id)?;
     let token = NekostorageLocation::parse(&settings.nekostorage)
@@ -233,9 +271,14 @@ mod tests {
         assert!(provider.display_location().ends_with("/api/Old"));
         assert!(provider.check().unwrap_err().to_string().contains("token"));
 
-        let local = provider_for_id(LocalStorage::ID, &settings, &music).unwrap();
         let song = StorageKey::from_components(["Song.flac"]).unwrap();
-        assert_eq!(local.local_path(&song), Some(music.join("Song.flac")));
+        let legacy = provider_for_id(LocalStorage::ID, &settings, &music).unwrap();
+        assert_eq!(legacy.local_path(&song), Some(music.join("Song.flac")));
+        let old_folder = dir.path().join("Old");
+        let id = LocalStorage::new(&old_folder).id().to_owned();
+        let local = provider_for_id(&id, &settings, &music).unwrap();
+        assert_eq!(local.id(), id);
+        assert_eq!(local.local_path(&song), Some(old_folder.join("Song.flac")));
 
         for id in ["", "dropbox", "nekostorage:", "nekostorage:ftp://h#/"] {
             assert!(provider_for_id(id, &settings, &music).is_none(), "{id}");
