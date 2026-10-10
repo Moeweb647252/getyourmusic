@@ -1,4 +1,4 @@
-//! Builds the vendored MediaRemote adapter framework on macOS.
+//! Builds the vendored MediaRemote adapter framework and its test client on macOS.
 
 use std::path::PathBuf;
 
@@ -12,7 +12,7 @@ fn main() {
     let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
     let source = manifest_dir.join("vendor/mediaremote-adapter");
     let out = cmake::Config::new(&source)
-        .build_target("MediaRemoteAdapter")
+        .build_target("all")
         .profile("Release")
         .build();
     let framework = out.join("build/MediaRemoteAdapter.framework");
@@ -20,6 +20,14 @@ fn main() {
         framework.exists(),
         "MediaRemoteAdapter.framework was not produced at {}",
         framework.display()
+    );
+    // The adapter's self-test starts this client when nothing is playing, so that it has
+    // something to read.
+    let test_client = out.join("build/MediaRemoteAdapterTestClient");
+    assert!(
+        test_client.is_file(),
+        "MediaRemoteAdapterTestClient was not produced at {}",
+        test_client.display()
     );
     // Keep the script next to the framework in the build output. A path into the source
     // tree breaks when another checkout sharing the target directory reuses this output.
@@ -33,5 +41,9 @@ fn main() {
     println!(
         "cargo:rustc-env=GYM_MEDIAREMOTE_SCRIPT={}",
         script.display()
+    );
+    println!(
+        "cargo:rustc-env=GYM_MEDIAREMOTE_TEST_CLIENT={}",
+        test_client.display()
     );
 }

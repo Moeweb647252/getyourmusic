@@ -22,36 +22,47 @@ use gym_core::now_playing::{NowPlayingError, NowPlayingEvent, NowPlayingSource, 
 const PERL: &str = "/usr/bin/perl";
 const FRAMEWORK_NAME: &str = "MediaRemoteAdapter.framework";
 const SCRIPT_NAME: &str = "mediaremote-adapter.pl";
+const TEST_CLIENT_NAME: &str = "MediaRemoteAdapterTestClient";
 
 pub struct AdapterNowPlaying {
     script: PathBuf,
     framework: PathBuf,
+    test_client: PathBuf,
 }
 
 impl AdapterNowPlaying {
     /// Finds the adapter: an explicit override, the app bundle, or the build output.
     pub fn locate() -> Result<Self, NowPlayingError> {
         let candidates = [
-            std::env::var_os("GYM_MEDIAREMOTE_FRAMEWORK")
-                .zip(std::env::var_os("GYM_MEDIAREMOTE_SCRIPT"))
-                .map(|(f, s)| (PathBuf::from(s), PathBuf::from(f))),
+            (|| {
+                Some(Self {
+                    script: std::env::var_os("GYM_MEDIAREMOTE_SCRIPT")?.into(),
+                    framework: std::env::var_os("GYM_MEDIAREMOTE_FRAMEWORK")?.into(),
+                    test_client: std::env::var_os("GYM_MEDIAREMOTE_TEST_CLIENT")?.into(),
+                })
+            })(),
             std::env::current_exe().ok().and_then(|exe| {
                 let contents = exe.parent()?.parent()?;
-                Some((
-                    contents.join("Resources").join(SCRIPT_NAME),
-                    contents.join("Frameworks").join(FRAMEWORK_NAME),
-                ))
+                Some(Self {
+                    script: contents.join("Resources").join(SCRIPT_NAME),
+                    framework: contents.join("Frameworks").join(FRAMEWORK_NAME),
+                    test_client: contents.join("Helpers").join(TEST_CLIENT_NAME),
+                })
             }),
-            Some((
-                PathBuf::from(env!("GYM_MEDIAREMOTE_SCRIPT")),
-                PathBuf::from(env!("GYM_MEDIAREMOTE_FRAMEWORK")),
-            )),
+            Some(Self {
+                script: env!("GYM_MEDIAREMOTE_SCRIPT").into(),
+                framework: env!("GYM_MEDIAREMOTE_FRAMEWORK").into(),
+                test_client: env!("GYM_MEDIAREMOTE_TEST_CLIENT").into(),
+            }),
         ];
         candidates
             .into_iter()
             .flatten()
-            .find(|(script, framework)| script.is_file() && framework.is_dir())
-            .map(|(script, framework)| Self { script, framework })
+            .find(|adapter| {
+                adapter.script.is_file()
+                    && adapter.framework.is_dir()
+                    && adapter.test_client.is_file()
+            })
             .ok_or_else(|| NowPlayingError::Unavailable("MediaRemote adapter not found".into()))
     }
 
@@ -61,10 +72,12 @@ impl AdapterNowPlaying {
         command
     }
 
-    /// Runs the adapter's own entitlement check.
+    /// Runs the adapter's own entitlement check. When nothing is playing, the adapter briefly
+    /// starts its test client so that there is something to read.
     fn self_test(&self) -> Result<(), NowPlayingError> {
         let mut child = self
             .command()
+            .arg(&self.test_client)
             .arg("test")
             .stdin(Stdio::null())
             .stdout(Stdio::null())

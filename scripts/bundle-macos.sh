@@ -28,11 +28,13 @@ if [[ -z "$framework" ]]; then
     echo "MediaRemoteAdapter.framework not found; was gym-platform built?" >&2
     exit 1
 fi
+test_client="$(dirname "$framework")/MediaRemoteAdapterTestClient"
 
 rm -rf "$app"
-mkdir -p "$contents/MacOS" "$contents/Resources" "$contents/Frameworks"
+mkdir -p "$contents/MacOS" "$contents/Resources" "$contents/Frameworks" "$contents/Helpers"
 cp "$target/getyourmusic" "$contents/MacOS/GetYourMusic"
 cp -R "$framework" "$contents/Frameworks/"
+cp "$test_client" "$contents/Helpers/"
 cp crates/gym-platform/vendor/mediaremote-adapter/bin/mediaremote-adapter.pl "$contents/Resources/"
 cp crates/gym-platform/vendor/mediaremote-adapter/LICENSE "$contents/Resources/mediaremote-adapter-LICENSE"
 sed "s/@VERSION@/$version/g" packaging/macos/Info.plist > "$contents/Info.plist"
